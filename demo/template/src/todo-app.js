@@ -31,8 +31,9 @@ template.innerHTML = `
     <task-list slot="content"></task-list>
     <p class="status-note" slot="status" data-testid="parallel-note">
       <strong>Minimal starter</strong>
-      Add autopilot:ready to the first three foundation issues to let separate
-      agents build the shell, list, and state layers from a tiny shared base.
+      Add autopilot:ready to the first four issues. Autopilot should still only
+      dispatch the first three while issue 4 waits on dependencies from this
+      tiny shared base.
     </p>
   </todo-shell>
 `;

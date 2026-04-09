@@ -25,7 +25,12 @@
     "labels": [
       "demo"
     ],
-    "body": "## Goal\n\nThis is the first follow-on ticket after the parallel foundation work. Keep it in backlog until the shell, list, and state tickets are merged. Then wire the pieces together in the app root so the repository becomes a working to-do application.\n\n## Acceptance Criteria\n\n- [ ] `src/todo-app.js` integrates the shell component, list component, and `TaskStore` into a usable app.\n- [ ] Users can add tasks, toggle them complete, delete them, switch filters, clear completed items, and see a remaining-task count.\n- [ ] The app restores persisted state after a reload.\n- [ ] Tests cover the end-to-end app flow from the root component.\n- [ ] The finished app still runs directly from static files served with `npx serve .`.\n\n## Validation\n\n- [ ] `npm test`\n- [ ] `npx serve . -l 4173` and verify the full to-do flow in a browser\n\n## Notes\n\n- Expect the parallel foundation PRs to land first.\n- Prefer integration over redesign: use the component and store contracts built in the earlier tickets unless there is a clear correctness issue."
+    "blocked_by": [
+      1,
+      2,
+      3
+    ],
+    "body": "## Goal\n\nThis is the first follow-on ticket after the parallel foundation work. It is seeded with GitHub issue dependencies on the first three foundation tickets, so it can be marked ready early while Autopilot still waits for those blockers to close. Then wire the pieces together in the app root so the repository becomes a working to-do application.\n\n## Acceptance Criteria\n\n- [ ] `src/todo-app.js` integrates the shell component, list component, and `TaskStore` into a usable app.\n- [ ] Users can add tasks, toggle them complete, delete them, switch filters, clear completed items, and see a remaining-task count.\n- [ ] The app restores persisted state after a reload.\n- [ ] Tests cover the end-to-end app flow from the root component.\n- [ ] The finished app still runs directly from static files served with `npx serve .`.\n\n## Validation\n\n- [ ] `npm test`\n- [ ] `npx serve . -l 4173` and verify the full to-do flow in a browser\n\n## Notes\n\n- Expect the parallel foundation PRs to land first.\n- Prefer integration over redesign: use the component and store contracts built in the earlier tickets unless there is a clear correctness issue."
   },
   {
     "title": "Polish accessibility, responsive layout, and demo documentation",

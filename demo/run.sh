@@ -85,18 +85,33 @@ create_label() {
 create_demo_issues() {
   local issues_path="$1"
   local repo="$2"
+  local manifest_path="$3"
 
-  python3 - "$issues_path" "$repo" <<'PY'
+  python3 - "$issues_path" "$repo" "$manifest_path" <<'PY'
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
 
-issues_path, repo = sys.argv[1], sys.argv[2]
+issues_path, repo, manifest_path = sys.argv[1], sys.argv[2], sys.argv[3]
+
+
+def run(command):
+    result = subprocess.run(command, check=False, capture_output=True, text=True)
+    if result.returncode != 0:
+        if result.stdout:
+            sys.stderr.write(result.stdout)
+        if result.stderr:
+            sys.stderr.write(result.stderr)
+        raise SystemExit(result.returncode)
+    return result
 
 with open(issues_path, encoding="utf-8") as handle:
     issues = json.load(handle)
+
+created_issues = []
 
 for index, issue in enumerate(issues, start=1):
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as body_file:
@@ -116,12 +131,92 @@ for index, issue in enumerate(issues, start=1):
         ]
         for label in issue.get("labels", []):
             command.extend(["--label", label])
-        result = subprocess.run(command, check=True, capture_output=True, text=True)
+        result = run(command)
     finally:
         os.unlink(body_path)
 
     url = result.stdout.strip().splitlines()[-1]
-    print(f"{index}. {issue['title']} -> {url}")
+    match = re.search(r"/issues/(\d+)$", url)
+    if match is None:
+        raise SystemExit(f"could not parse issue number from gh output: {url}")
+
+    issue_details = json.loads(run(["gh", "api", f"repos/{repo}/issues/{match.group(1)}"]).stdout)
+    created_issue = {
+        "index": index,
+        "number": issue_details["number"],
+        "id": issue_details["node_id"],
+        "url": issue_details["html_url"],
+        "title": issue_details["title"],
+        "blocked_by": issue.get("blocked_by", []),
+    }
+    created_issues.append(created_issue)
+    print(f"{index}. {created_issue['title']} -> {created_issue['url']}")
+
+with open(manifest_path, "w", encoding="utf-8") as handle:
+    json.dump(created_issues, handle, indent=2)
+    handle.write("\n")
+PY
+}
+
+wire_demo_dependencies() {
+  local manifest_path="$1"
+
+  python3 - "$manifest_path" <<'PY'
+import json
+import subprocess
+import sys
+
+manifest_path = sys.argv[1]
+
+
+def run(command):
+    result = subprocess.run(command, check=False, capture_output=True, text=True)
+    if result.returncode != 0:
+        if result.stdout:
+            sys.stderr.write(result.stdout)
+        if result.stderr:
+            sys.stderr.write(result.stderr)
+        raise SystemExit(result.returncode)
+    return result
+
+
+with open(manifest_path, encoding="utf-8") as handle:
+    issues = json.load(handle)
+
+issues_by_index = {issue["index"]: issue for issue in issues}
+summary_lines = []
+
+for issue in issues:
+    blockers = issue.get("blocked_by", [])
+    if not blockers:
+        continue
+
+    for blocker_index in blockers:
+        blocker = issues_by_index.get(blocker_index)
+        if blocker is None:
+            raise SystemExit(
+                f"issue {issue['index']} references missing blocker index {blocker_index}"
+            )
+
+        run(
+            [
+                "gh",
+                "api",
+                "graphql",
+                "-f",
+                "query=mutation($issueId: ID!, $blockingIssueId: ID!) { addBlockedBy(input: { issueId: $issueId, blockingIssueId: $blockingIssueId }) { clientMutationId } }",
+                "-F",
+                f"issueId={issue['id']}",
+                "-F",
+                f"blockingIssueId={blocker['id']}",
+            ]
+        )
+
+    blocker_numbers = ", ".join(f"#{issues_by_index[index]['number']}" for index in blockers)
+    summary_lines.append(f"#{issue['number']} is blocked by {blocker_numbers}")
+
+if summary_lines:
+    print("\n".join(summary_lines))
 PY
 }
 
@@ -232,6 +327,7 @@ source_repo="$output_root/$repo_name"
 workflow_path="$output_root/WORKFLOW.generated.md"
 start_script_path="$output_root/start-autopilot.sh"
 issues_path="$script_dir/demo-issues.json"
+issue_manifest_path="$output_root/issues.generated.json"
 
 [[ -f "$issues_path" ]] || die "missing demo issue seed file: $issues_path"
 [[ -d "$script_dir/template" ]] || die "missing demo template directory: $script_dir/template"
@@ -273,13 +369,17 @@ create_label "$full_repo" "autopilot:blocked" "b60205" "blocked on an external d
 create_label "$full_repo" "autopilot:question" "006b75" "waiting on a product clarification"
 
 log "Creating demo issue queue"
-issue_summary="$(create_demo_issues "$issues_path" "$full_repo")"
+issue_summary="$(create_demo_issues "$issues_path" "$full_repo" "$issue_manifest_path")"
+
+log "Creating dependency edges for blocked demo issues"
+dependency_summary="$(wire_demo_dependencies "$issue_manifest_path")"
 
 log "Rendering workflow from example/WORKFLOW.md"
 sed \
   -e "s|repository: YOUR_ORG/YOUR_REPO|repository: $(escape_sed_replacement "$full_repo")|g" \
   -e "s|root: ~/code/autopilot-workspaces|root: $(escape_sed_replacement "$workspace_root")|g" \
   -e "s|git clone --depth 1 https://github.com/YOUR_ORG/YOUR_REPO \.|git clone --depth 1 https://github.com/$full_repo .|g" \
+  -e "s|max_concurrent_agents: [0-9][0-9]*|max_concurrent_agents: 5|g" \
   "$repo_root/example/WORKFLOW.md" > "$workflow_path"
 
 cat > "$start_script_path" <<EOF
@@ -319,10 +419,13 @@ Autopilot launcher: $start_script_path
 Issue queue:
 $issue_summary
 
+Issue dependencies:
+$dependency_summary
+
 Next steps:
 1. Inspect the seeded repository and issue queue.
 2. Start Autopilot with: $start_script_path
-3. Add autopilot:ready to the first three foundation issues to trigger the parallel demo wave.
+3. Add autopilot:ready to the first four issues. The rendered workflow allows five concurrent agents, but only the three unblocked foundation issues should dispatch immediately.
 4. Review and merge those issues by moving each label from autopilot:human-review to autopilot:merging.
-5. After the three foundation issues close, add autopilot:ready to the integration issue, then do the same for the final polish issue.
+5. Once the foundation issues close, the already-ready integration issue can dispatch. Add autopilot:ready to the final polish issue after that.
 EOF

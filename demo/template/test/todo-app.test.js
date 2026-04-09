@@ -15,6 +15,6 @@ describe("todo-app", () => {
 
     expect(shadowRoot?.querySelector("todo-shell")).not.toBeNull();
     expect(shadowRoot?.querySelector("task-list")).not.toBeNull();
-    expect(shadowRoot?.querySelector("[data-testid='parallel-note']")?.textContent).toContain("tiny shared base");
+    expect(shadowRoot?.querySelector("[data-testid='parallel-note']")?.textContent).toContain("first four issues");
   });
 });
