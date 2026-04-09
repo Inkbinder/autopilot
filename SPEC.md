@@ -4,7 +4,7 @@ Status: Draft v1 (language-agnostic; reference implementation target selected)
 
 Purpose: Define a service that orchestrates coding agents to get project work done.
 
-This draft assumes a reference implementation target of a single Go 1.24 service on Linux, using
+This draft assumes a reference implementation target of a single Go service on Linux, using
 GitHub APIs directly (GraphQL-first reads and REST for narrow operational writes, with no `gh`
 dependency), the local GitHub Copilot CLI over ACP stdio, local filesystem workspaces,
 in-memory orchestrator state, `WORKFLOW.md` with strict Liquid-style prompt rendering,
