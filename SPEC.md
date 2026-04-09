@@ -1,4 +1,4 @@
-# Symphony Service Specification
+# Autopilot Service Specification
 
 Status: Draft v1 (language-agnostic)
 
@@ -6,7 +6,7 @@ Purpose: Define a service that orchestrates coding agents to get project work do
 
 ## 1. Problem Statement
 
-Symphony is a long-running automation service that continuously reads work from an issue tracker
+Autopilot is a long-running automation service that continuously reads work from an issue tracker
 (GitHub Issues in this specification version), creates an isolated workspace for each issue, and runs a
 coding agent session for that issue inside the workspace.
 
@@ -26,7 +26,7 @@ require stricter approvals or sandboxing.
 
 Important boundary:
 
-- Symphony is a scheduler/runner and tracker reader.
+- Autopilot is a scheduler/runner and tracker reader.
 - Ticket writes (state transitions, comments, PR links) are typically performed by the coding agent
   using tools available in the workflow/runtime environment.
 - A successful run may end at a workflow-defined handoff state (for example `Human Review`), not
@@ -103,7 +103,7 @@ Important boundary:
 
 ### 3.2 Abstraction Levels
 
-Symphony is easiest to port when kept in these layers:
+Autopilot is easiest to port when kept in these layers:
 
 1. `Policy Layer` (repo-defined)
    - `WORKFLOW.md` prompt body.
@@ -360,12 +360,12 @@ Fields:
   - Default: `Closed`
 - `dispatch_labels` (list of strings)
   - Optional.
-  - Default: `symphony:ready`, `symphony:merging`, `symphony:in-progress`, `symphony:rework`
+  - Default: `autopilot:ready`, `autopilot:merging`, `autopilot:in-progress`, `autopilot:rework`
   - If non-empty, an issue must have at least one matching label to be dispatch-eligible.
   - Compare configured values and issue labels after `lowercase`.
 - `excluded_labels` (list of strings)
   - Optional.
-  - Default: `symphony:human-review`, `symphony:blocked`, `symphony:question`
+  - Default: `autopilot:human-review`, `autopilot:blocked`, `autopilot:question`
   - If any configured label is present on the issue, the issue is not dispatch-eligible.
   - Compare configured values and issue labels after `lowercase`.
 
@@ -382,7 +382,7 @@ Fields:
 Fields:
 
 - `root` (path string or `$VAR`)
-  - Default: `<system-temp>/symphony_workspaces`
+  - Default: `<system-temp>/autopilot_workspaces`
   - `~` and strings containing path separators are expanded.
   - Bare strings without path separators are preserved as-is (relative roots are allowed but
     discouraged).
@@ -575,10 +575,10 @@ This section is intentionally redundant so a coding agent can implement the conf
 - `tracker.repository`: string, required when `tracker.kind=github`, format `<owner>/<repo>`
 - `tracker.active_states`: list of strings, default `["Open"]`
 - `tracker.terminal_states`: list of strings, default `["Closed"]`
-- `tracker.dispatch_labels`: list of strings, default `["symphony:ready", "symphony:merging", "symphony:in-progress", "symphony:rework"]`; any matching label makes an open issue eligible for dispatch
-- `tracker.excluded_labels`: list of strings, default `["symphony:human-review", "symphony:blocked", "symphony:question"]`; any matching label makes an issue ineligible for dispatch
+- `tracker.dispatch_labels`: list of strings, default `["autopilot:ready", "autopilot:merging", "autopilot:in-progress", "autopilot:rework"]`; any matching label makes an open issue eligible for dispatch
+- `tracker.excluded_labels`: list of strings, default `["autopilot:human-review", "autopilot:blocked", "autopilot:question"]`; any matching label makes an issue ineligible for dispatch
 - `polling.interval_ms`: integer, default `30000`
-- `workspace.root`: path, default `<system-temp>/symphony_workspaces`
+- `workspace.root`: path, default `<system-temp>/autopilot_workspaces`
 - `worker.ssh_hosts` (extension): list of SSH host strings, optional; when omitted, work runs
   locally
 - `worker.max_concurrent_agents_per_host` (extension): positive integer, optional; shared per-host
@@ -1201,7 +1201,7 @@ Orchestrator behavior on tracker errors:
 
 ### 11.5 Tracker Writes (Important Boundary)
 
-Symphony does not require first-class tracker write APIs in the orchestrator.
+Autopilot does not require first-class tracker write APIs in the orchestrator.
 
 - Ticket mutations (state transitions, comments, PR metadata) are typically handled by the coding
   agent using tools defined by the workflow prompt.
@@ -1442,7 +1442,7 @@ Minimum endpoints:
       "issue_id": "abc123",
       "status": "running",
       "workspace": {
-        "path": "/tmp/symphony_workspaces/octo-org_widgets_649"
+        "path": "/tmp/autopilot_workspaces/octo-org_widgets_649"
       },
       "attempts": {
         "restart_count": 1,
@@ -1467,7 +1467,7 @@ Minimum endpoints:
         "copilot_session_logs": [
           {
             "label": "latest",
-            "path": "/var/log/symphony/copilot/octo-org_widgets_649/latest.log",
+            "path": "/var/log/autopilot/copilot/octo-org_widgets_649/latest.log",
             "url": null
           }
         ]
@@ -1938,7 +1938,7 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - `tracker.kind` validation enforces currently supported kind (`github`)
 - `tracker.api_key` works (including `$VAR` indirection)
 - `$VAR` resolution works for tracker API key and path values
-- `dispatch_labels` and `excluded_labels` default to the documented Symphony label sets and normalize label values
+- `dispatch_labels` and `excluded_labels` default to the documented Autopilot label sets and normalize label values
 - `~` path expansion works
 - `copilot.command` is preserved as a shell command string
 - Per-state concurrency override map normalizes state names and ignores invalid values
@@ -2095,7 +2095,7 @@ Use the same validation profiles as Section 17:
 - Optional HTTP server honors CLI `--port` over `server.port`, uses a safe default bind host, and
   exposes the baseline endpoints/error semantics in Section 13.7 if shipped.
 - Optional GitHub MCP tool exposure is wired into the Copilot session using the configured
-  Symphony auth and transport model.
+  Autopilot auth and transport model.
 - TODO: Persist retry queue and session metadata across process restarts.
 - TODO: Make observability settings configurable in workflow front matter without prescribing UI
   implementation details.
@@ -2112,7 +2112,7 @@ Use the same validation profiles as Section 17:
 
 ## Appendix A. SSH Worker Extension (Optional)
 
-This appendix describes a common extension profile in which Symphony keeps one central
+This appendix describes a common extension profile in which Autopilot keeps one central
 orchestrator but executes worker runs on one or more remote hosts over SSH.
 
 ### A.1 Execution Model
