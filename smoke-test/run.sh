@@ -6,8 +6,8 @@ usage() {
 Usage: smoke-test/run.sh [--owner OWNER] [--port PORT] [--public] [--keep-local] [--keep-remote]
 
 Creates a disposable GitHub repository and issue, renders a smoke workflow,
-starts Autopilot against it, validates dispatch and workspace behavior, then
-closes the issue to trigger cleanup before deleting the repository and local
+starts Autopilot against it, validates dependency-aware dispatch and workspace
+behavior, then closes the issues to trigger cleanup before deleting the repository and local
 temporary files.
 
 Options:
@@ -24,9 +24,10 @@ Requirements:
   - a token available to Autopilot through GITHUB_TOKEN
   - git, go, curl, and bash
 
-This smoke harness validates GitHub polling, workspace creation, ACP transport
-plumbing, the local status API, and terminal-state cleanup. It uses a fake ACP
-server instead of the real Copilot CLI so the run stays deterministic.
+This smoke harness validates GitHub polling, dependency-aware dispatch,
+workspace creation, ACP transport plumbing, the local status API, and
+terminal-state cleanup. It uses a fake ACP server instead of the real Copilot
+CLI so the run stays deterministic.
 EOF
 }
 
@@ -123,6 +124,8 @@ wait_for_api() {
 }
 
 wait_for_dispatch() {
+  local issue_identifier="$1"
+  local workspace_path="$2"
   local deadline=$((SECONDS + 90))
   local state_url="http://127.0.0.1:$port/api/v1/state"
   local detail_url="http://127.0.0.1:$port/api/v1/$(urlencode "$issue_identifier")"
@@ -150,6 +153,8 @@ wait_for_dispatch() {
 }
 
 wait_for_cleanup() {
+  local issue_identifier="$1"
+  local workspace_path="$2"
   local deadline=$((SECONDS + 90))
   local detail_url="http://127.0.0.1:$port/api/v1/$(urlencode "$issue_identifier")"
 
@@ -169,6 +174,38 @@ wait_for_cleanup() {
   die "timed out waiting for workspace cleanup after closing the issue"
 }
 
+assert_not_dispatched() {
+  local issue_identifier="$1"
+  local workspace_path="$2"
+  local duration_seconds="$3"
+  local deadline=$((SECONDS + duration_seconds))
+  local state_url="http://127.0.0.1:$port/api/v1/state"
+  local detail_url="http://127.0.0.1:$port/api/v1/$(urlencode "$issue_identifier")"
+  local state_json
+
+  while (( SECONDS < deadline )); do
+    if ! kill -0 "$autopilot_pid" 2>/dev/null; then
+      die "Autopilot exited while verifying blocked issue remained undispatched"
+    fi
+
+    if [[ -e "$workspace_path" ]]; then
+      die "blocked issue unexpectedly created a workspace at $workspace_path"
+    fi
+
+    if curl -sf "$detail_url" >/dev/null 2>&1; then
+      die "blocked issue unexpectedly became tracked before its blocker closed"
+    fi
+
+    state_json="$(curl -sf "$state_url" 2>/dev/null || true)"
+    if grep -q "$issue_identifier" <<<"$state_json"; then
+      die "blocked issue unexpectedly appeared in orchestrator state before its blocker closed"
+    fi
+
+    curl -sf -X POST "http://127.0.0.1:$port/api/v1/refresh" >/dev/null 2>&1 || true
+    sleep 1
+  done
+}
+
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/.." && pwd)"
 
@@ -185,6 +222,12 @@ autopilot_pid=""
 autopilot_log=""
 issue_identifier=""
 workspace_path=""
+blocker_issue_number=""
+blocker_issue_identifier=""
+blocker_workspace_path=""
+dependent_issue_number=""
+dependent_issue_identifier=""
+dependent_workspace_path=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -271,11 +314,37 @@ repo_created=1
 gh api --method PATCH "repos/$full_repo" -f has_issues=true >/dev/null
 gh api --method POST "repos/$full_repo/labels" -f name='autopilot:ready' -f color='0e8a16' -f description='autopilot smoke dispatch' >/dev/null 2>&1 || true
 
-issue_url="$(gh issue create --repo "$full_repo" --title "Autopilot smoke test" --body "Disposable smoke-test issue created by smoke-test/run.sh." --label "autopilot:ready")"
-issue_number="${issue_url##*/}"
-issue_identifier="$full_repo#$issue_number"
-workspace_key="$(printf '%s' "$issue_identifier" | sed 's/[^A-Za-z0-9._-]/_/g')"
-workspace_path="$workspace_root/$workspace_key"
+log "Creating blocker issue"
+blocker_issue_url="$(gh issue create --repo "$full_repo" --title "Autopilot smoke blocker" --body "Disposable blocker issue created by smoke-test/run.sh." --label "autopilot:ready")"
+blocker_issue_number="${blocker_issue_url##*/}"
+blocker_issue_identifier="$full_repo#$blocker_issue_number"
+blocker_workspace_key="$(printf '%s' "$blocker_issue_identifier" | sed 's/[^A-Za-z0-9._-]/_/g')"
+blocker_workspace_path="$workspace_root/$blocker_workspace_key"
+
+log "Creating dependent issue"
+dependent_issue_url="$(gh issue create --repo "$full_repo" --title "Autopilot smoke dependent" --body "Disposable dependent issue created by smoke-test/run.sh. It must not dispatch until its blocker is closed." --label "autopilot:ready")"
+dependent_issue_number="${dependent_issue_url##*/}"
+dependent_issue_identifier="$full_repo#$dependent_issue_number"
+dependent_workspace_key="$(printf '%s' "$dependent_issue_identifier" | sed 's/[^A-Za-z0-9._-]/_/g')"
+dependent_workspace_path="$workspace_root/$dependent_workspace_key"
+
+blocker_issue_id="$(gh api "repos/$full_repo/issues/$blocker_issue_number" --jq .id)"
+[[ -n "$blocker_issue_id" ]] || die "could not determine REST issue id for blocker issue"
+
+log "Creating GitHub dependency: $dependent_issue_identifier blocked by $blocker_issue_identifier"
+gh api \
+  --method POST \
+  -H 'Accept: application/vnd.github+json' \
+  -H 'X-GitHub-Api-Version: 2026-03-10' \
+  "repos/$full_repo/issues/$dependent_issue_number/dependencies/blocked_by" \
+  -F issue_id="$blocker_issue_id" >/dev/null
+
+dependency_count="$(gh api \
+  -H 'Accept: application/vnd.github+json' \
+  -H 'X-GitHub-Api-Version: 2026-03-10' \
+  "repos/$full_repo/issues/$dependent_issue_number/dependencies/blocked_by" \
+  --jq 'length')"
+[[ "$dependency_count" == "1" ]] || die "expected 1 blocker for dependent issue, got $dependency_count"
 
 log "Rendering smoke workflow"
 sed \
@@ -301,12 +370,24 @@ log "State API is ready"
 
 curl -sf -X POST "http://127.0.0.1:$port/api/v1/refresh" >/dev/null
 
-wait_for_dispatch
-log "Dispatch validated: workspace cloned and ACP activity observed"
+wait_for_dispatch "$blocker_issue_identifier" "$blocker_workspace_path"
+log "Dispatch validated for blocker issue: workspace cloned and ACP activity observed"
 
-log "Closing smoke issue $issue_identifier to trigger terminal cleanup"
-gh issue close "$issue_number" --repo "$full_repo" --comment "Closing disposable smoke issue after successful Autopilot dispatch." >/dev/null
+assert_not_dispatched "$dependent_issue_identifier" "$dependent_workspace_path" 10
+log "Dependency gating validated: dependent issue stayed undispatched while blocker remained open"
 
-wait_for_cleanup
-log "Cleanup validated: workspace removed and issue released from tracking"
+log "Closing blocker issue $blocker_issue_identifier to unblock dependent dispatch"
+gh issue close "$blocker_issue_number" --repo "$full_repo" --comment "Closing disposable blocker issue after successful dependency-gating validation." >/dev/null
+
+wait_for_cleanup "$blocker_issue_identifier" "$blocker_workspace_path"
+log "Cleanup validated for blocker issue"
+
+wait_for_dispatch "$dependent_issue_identifier" "$dependent_workspace_path"
+log "Unblock validated: dependent issue dispatched after blocker reached terminal state"
+
+log "Closing dependent issue $dependent_issue_identifier to trigger final terminal cleanup"
+gh issue close "$dependent_issue_number" --repo "$full_repo" --comment "Closing disposable dependent issue after successful Autopilot dispatch." >/dev/null
+
+wait_for_cleanup "$dependent_issue_identifier" "$dependent_workspace_path"
+log "Cleanup validated for dependent issue"
 log "Smoke test passed for $full_repo"

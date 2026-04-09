@@ -227,6 +227,21 @@ type issueNode struct {
 			Name string `json:"name"`
 		} `json:"nodes"`
 	} `json:"labels"`
+	BlockedBy struct {
+		Nodes []*issueDependencyNode `json:"nodes"`
+	} `json:"blockedBy"`
+}
+
+type issueDependencyNode struct {
+	ID         string `json:"id"`
+	Number     int    `json:"number"`
+	State      string `json:"state"`
+	Repository struct {
+		Name  string `json:"name"`
+		Owner struct {
+			Login string `json:"login"`
+		} `json:"owner"`
+	} `json:"repository"`
 }
 
 func normalizeIssueNode(defaultOwner string, defaultRepository string, node issueNode) model.Issue {
@@ -251,7 +266,7 @@ func normalizeIssueNode(defaultOwner string, defaultRepository string, node issu
 		Title:      node.Title,
 		State:      strings.Title(strings.ToLower(node.State)),
 		Labels:     labels,
-		BlockedBy:  []model.BlockerRef{},
+		BlockedBy:  normalizeBlockedBy(owner, repository, node.BlockedBy.Nodes),
 	}
 	if strings.TrimSpace(node.Body) != "" {
 		body := node.Body
@@ -268,6 +283,41 @@ func normalizeIssueNode(defaultOwner string, defaultRepository string, node issu
 		issue.UpdatedAt = &updatedAt
 	}
 	return issue
+}
+
+func normalizeBlockedBy(defaultOwner string, defaultRepository string, nodes []*issueDependencyNode) []model.BlockerRef {
+	blockers := make([]model.BlockerRef, 0, len(nodes))
+	for _, node := range nodes {
+		if node == nil {
+			continue
+		}
+		blocker := model.BlockerRef{}
+		if trimmed := strings.TrimSpace(node.ID); trimmed != "" {
+			id := trimmed
+			blocker.ID = &id
+		}
+		owner := defaultOwner
+		repository := defaultRepository
+		if trimmed := strings.TrimSpace(node.Repository.Owner.Login); trimmed != "" {
+			owner = trimmed
+		}
+		if trimmed := strings.TrimSpace(node.Repository.Name); trimmed != "" {
+			repository = trimmed
+		}
+		if node.Number > 0 {
+			identifier := fmt.Sprintf("%s/%s#%d", owner, repository, node.Number)
+			blocker.Identifier = &identifier
+		}
+		if trimmed := strings.TrimSpace(node.State); trimmed != "" {
+			state := strings.Title(strings.ToLower(trimmed))
+			blocker.State = &state
+		}
+		if blocker.ID == nil && blocker.Identifier == nil && blocker.State == nil {
+			continue
+		}
+		blockers = append(blockers, blocker)
+	}
+	return blockers
 }
 
 func matchesLabels(issueLabels []string, dispatchLabels []string, excludedLabels []string) bool {
@@ -371,11 +421,24 @@ const repositorySearchQuery = `query SearchIssues($query: String!, $first: Int!,
             login
           }
         }
-        labels(first: 50) {
+				labels(first: 50) {
           nodes {
             name
           }
         }
+				blockedBy(first: 50) {
+					nodes {
+						id
+						number
+						state
+						repository {
+							name
+							owner {
+								login
+							}
+						}
+					}
+				}
       }
     }
   }
@@ -399,11 +462,24 @@ const issueStatesQuery = `query IssueStatesByIDs($ids: [ID!]!) {
           login
         }
       }
-      labels(first: 50) {
+			labels(first: 50) {
         nodes {
           name
         }
       }
+			blockedBy(first: 50) {
+				nodes {
+					id
+					number
+					state
+					repository {
+						name
+						owner {
+							login
+						}
+					}
+				}
+			}
     }
   }
 }`

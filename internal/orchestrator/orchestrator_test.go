@@ -114,7 +114,7 @@ func (session *fakeSession) Close(context.Context) error { return nil }
 func TestOrchestratorTickDispatchesAndQueuesContinuationRetry(t *testing.T) {
 	t.Parallel()
 	workflowPath := writeWorkflowFile(t)
-	issue := model.Issue{ID: "1", Identifier: "octo/widgets#1", Title: "Task", State: "Open", Labels: []string{"autopilot:ready"}}
+	issue := model.Issue{ID: "1", Identifier: "octo/widgets#1", Title: "Task", State: "Open", Labels: []string{"autopilot:ready"}, BlockedBy: []model.BlockerRef{{Identifier: stringPtr("octo/widgets#2"), State: stringPtr("Closed")}}}
 	fakeTracker := &fakeTracker{candidates: []model.Issue{issue}, statesByID: map[string]model.Issue{"1": {ID: "1", Identifier: issue.Identifier, Title: issue.Title, State: "Closed"}}}
 	fakeWorkspace := &fakeWorkspace{root: filepath.Join(t.TempDir(), "workspaces")}
 	fakeCopilot := &fakeCopilot{}
@@ -137,6 +137,36 @@ func TestOrchestratorTickDispatchesAndQueuesContinuationRetry(t *testing.T) {
 	if orchestrator.state.copilotTotals.TotalTokens != 15 {
 		orchestrator.mu.Unlock()
 		t.Fatalf("total tokens = %d, want 15", orchestrator.state.copilotTotals.TotalTokens)
+	}
+	orchestrator.mu.Unlock()
+	_ = orchestrator.shutdown(context.Background())
+}
+
+func TestOrchestratorTickSkipsIssueWithActiveBlockers(t *testing.T) {
+	t.Parallel()
+	workflowPath := writeWorkflowFile(t)
+	issue := model.Issue{ID: "1", Identifier: "octo/widgets#1", Title: "Task", State: "Open", Labels: []string{"autopilot:ready"}, BlockedBy: []model.BlockerRef{{Identifier: stringPtr("octo/widgets#2"), State: stringPtr("Open")}}}
+	fakeTracker := &fakeTracker{candidates: []model.Issue{issue}}
+	fakeWorkspace := &fakeWorkspace{root: filepath.Join(t.TempDir(), "workspaces")}
+	fakeCopilot := &fakeCopilot{}
+	orchestrator, err := New(workflowPath, Options{Builder: fakeBuilder{tracker: fakeTracker, workspace: fakeWorkspace, copilot: fakeCopilot}})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	orchestrator.tick(context.Background())
+	orchestrator.wg.Wait()
+
+	if len(fakeCopilot.prompts) != 0 {
+		t.Fatalf("prompts = %d, want 0", len(fakeCopilot.prompts))
+	}
+	orchestrator.mu.Lock()
+	if len(orchestrator.state.running) != 0 {
+		orchestrator.mu.Unlock()
+		t.Fatalf("running length = %d, want 0", len(orchestrator.state.running))
+	}
+	if len(orchestrator.state.retryAttempts) != 0 {
+		orchestrator.mu.Unlock()
+		t.Fatalf("retry queue length = %d, want 0", len(orchestrator.state.retryAttempts))
 	}
 	orchestrator.mu.Unlock()
 	_ = orchestrator.shutdown(context.Background())
@@ -232,4 +262,8 @@ Implement {{ issue.identifier }}
 		t.Fatalf("WriteFile() error = %v", err)
 	}
 	return path
+}
+
+func stringPtr(value string) *string {
+	return &value
 }

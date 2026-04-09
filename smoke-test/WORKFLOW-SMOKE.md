@@ -17,7 +17,7 @@ hooks:
   after_create: |
     git clone "__SMOKE_SOURCE_REPO__" .
 agent:
-  max_concurrent_agents: 1
+  max_concurrent_agents: 2
   max_turns: 1
   max_retry_backoff_ms: 5000
 copilot:
@@ -33,4 +33,4 @@ server:
 This is a disposable Autopilot smoke test for {{ issue.identifier }}.
 
 Operate only inside the provided workspace. Do not ask for user input.
-The smoke harness will close the issue to end the run.
+The smoke harness will close issues to end the run.

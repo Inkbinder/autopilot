@@ -1160,6 +1160,9 @@ GitHub-specific requirements for `tracker.kind == "github"`:
   dispatch/excluded labels
 - Implementations may enforce label filters server-side or client-side, but the resulting
   candidate set must match the configured eligibility rules
+- GitHub dependency blockers should be read from the `Issue.blockedBy(first: 50)` GraphQL
+  connection; closed blockers may remain attached as dependency edges, but only non-terminal
+  blockers suppress dispatch
 - Issue-state refresh query uses GitHub node IDs with variable type `[ID!]`
 - Closed-issue fetch for startup cleanup queries the same repository with terminal states
 - Pagination required for candidate and terminal issue fetches
@@ -1182,7 +1185,8 @@ Candidate issue normalization should produce fields listed in Section 4.1.1.
 Additional normalization details:
 
 - `labels` -> lowercase strings
-- `blocked_by` -> derived from GitHub issue dependency data when available; otherwise empty list
+- `blocked_by` -> derived from GitHub issue dependency data when available, using the GraphQL
+  `blockedBy(first: 50)` connection for blocker refs; otherwise empty list
 - `priority` -> integer only (non-integers become null); GitHub Issues typically do not provide a
   native integer priority, so this is usually `null` unless the implementation maps a repository-
   specific source such as labels or project fields
