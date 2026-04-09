@@ -1,8 +1,14 @@
 # Autopilot Service Specification
 
-Status: Draft v1 (language-agnostic)
+Status: Draft v1 (language-agnostic; reference implementation target selected)
 
 Purpose: Define a service that orchestrates coding agents to get project work done.
+
+This draft assumes a reference implementation target of a single Go 1.24 service on Linux, using
+GitHub APIs directly (GraphQL-first reads and REST for narrow operational writes, with no `gh`
+dependency), the local GitHub Copilot CLI over ACP stdio, local filesystem workspaces,
+in-memory orchestrator state, `WORKFLOW.md` with strict Liquid-style prompt rendering,
+structured JSON logging, and a built-in HTTP status API.
 
 ## 1. Problem Statement
 
@@ -127,10 +133,12 @@ Autopilot is easiest to port when kept in these layers:
 
 ### 3.3 External Dependencies
 
-- Issue tracker API (GitHub for `tracker.kind: github` in this specification version).
+- GitHub APIs for issue tracking and operational integration (`tracker.kind: github` in this
+  specification version), using direct API access rather than a local `gh` dependency.
 - Local filesystem for workspaces and logs.
 - Optional workspace population tooling (for example Git CLI, if used).
-- GitHub Copilot CLI executable that supports ACP server mode and/or headless mode.
+- GitHub Copilot CLI executable that supports ACP server mode and/or headless mode, with ACP
+  stdio as the reference transport.
 - Host environment authentication for the issue tracker and coding agent.
 
 ## 4. Core Domain Model
