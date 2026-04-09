@@ -10,8 +10,8 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"autopilot/internal/orchestrator"
-	"autopilot/internal/workflow"
+	"github.com/Inkbinder/autopilot/internal/orchestrator"
+	"github.com/Inkbinder/autopilot/internal/workflow"
 )
 
 func main() {

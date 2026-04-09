@@ -14,7 +14,7 @@ import (
 	"syscall"
 	"time"
 
-	"autopilot/internal/workflow"
+	"github.com/Inkbinder/autopilot/internal/workflow"
 )
 
 const maxACPLineBytes = 10 * 1024 * 1024
@@ -64,12 +64,12 @@ func (client *ACPStdioClient) StartSession(ctx context.Context, request StartReq
 }
 
 type acpProcess struct {
-	command   *exec.Cmd
-	stdin     io.WriteCloser
-	pid       *int
-	onEvent   EventHandler
+	command     *exec.Cmd
+	stdin       io.WriteCloser
+	pid         *int
+	onEvent     EventHandler
 	gracePeriod time.Duration
-	sessionID string
+	sessionID   string
 
 	mu        sync.Mutex
 	nextID    int
@@ -114,13 +114,13 @@ func startACPProcess(workspacePath string, config workflow.CopilotConfig, onEven
 		return nil, wrap(ErrCopilotCLINotFound, err)
 	}
 	process := &acpProcess{
-		command:    command,
-		stdin:      stdin,
-		onEvent:    onEvent,
+		command:     command,
+		stdin:       stdin,
+		onEvent:     onEvent,
 		gracePeriod: gracePeriod,
-		pending:    map[int]chan acpEnvelope{},
-		waitDone:   make(chan struct{}),
-		interrupt:  make(chan error, 4),
+		pending:     map[int]chan acpEnvelope{},
+		waitDone:    make(chan struct{}),
+		interrupt:   make(chan error, 4),
 	}
 	if command.Process != nil {
 		pid := command.Process.Pid
@@ -203,7 +203,7 @@ func (process *acpProcess) Close(ctx context.Context) error {
 
 func (process *acpProcess) initialize(ctx context.Context) error {
 	_, err := process.call(ctx, "initialize", map[string]any{
-		"protocolVersion": "autopilot-v1",
+		"protocolVersion":    "autopilot-v1",
 		"clientCapabilities": map[string]any{},
 	})
 	if err != nil {
@@ -376,7 +376,7 @@ func (process *acpProcess) respondApproval(requestID int) error {
 		"result": map[string]any{
 			"approved": true,
 			"decision": "allow",
-			"action": "allow",
+			"action":   "allow",
 		},
 	}
 	line, err := json.Marshal(response)

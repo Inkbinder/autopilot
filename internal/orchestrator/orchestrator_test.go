@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"autopilot/internal/copilot"
-	"autopilot/internal/model"
-	"autopilot/internal/workflow"
+	"github.com/Inkbinder/autopilot/internal/copilot"
+	"github.com/Inkbinder/autopilot/internal/model"
+	"github.com/Inkbinder/autopilot/internal/workflow"
 )
 
 type fakeBuilder struct {
@@ -74,12 +74,12 @@ func (workspace *fakeWorkspace) CreateForIssue(_ context.Context, issueIdentifie
 }
 
 func (workspace *fakeWorkspace) PrepareForRun(context.Context, model.Workspace) error { return nil }
-func (workspace *fakeWorkspace) RunAfterRunHook(context.Context, string) error { return nil }
+func (workspace *fakeWorkspace) RunAfterRunHook(context.Context, string) error        { return nil }
 func (workspace *fakeWorkspace) RemoveForIssue(_ context.Context, issueIdentifier string) error {
 	workspace.removed = append(workspace.removed, issueIdentifier)
 	return nil
 }
-func (workspace *fakeWorkspace) Root() string { return workspace.root }
+func (workspace *fakeWorkspace) Root() string                       { return workspace.root }
 func (workspace *fakeWorkspace) ValidateWorkspacePath(string) error { return nil }
 
 type fakeCopilot struct {
@@ -99,9 +99,9 @@ type fakeSession struct {
 	client *fakeCopilot
 }
 
-func (session *fakeSession) ID() string { return "fake-session" }
+func (session *fakeSession) ID() string        { return "fake-session" }
 func (session *fakeSession) Transport() string { return "acp_stdio" }
-func (session *fakeSession) ProcessID() *int { return nil }
+func (session *fakeSession) ProcessID() *int   { return nil }
 func (session *fakeSession) RunPrompt(_ context.Context, prompt string, turn int) error {
 	session.client.prompts = append(session.client.prompts, prompt)
 	if session.client.onEvent != nil {
@@ -152,11 +152,11 @@ func TestHTTPHandlersServeStateRefreshAndIssueDetail(t *testing.T) {
 	now := time.Now().UTC()
 	orchestrator.mu.Lock()
 	orchestrator.state.running["1"] = &runningEntry{
-		Issue: model.Issue{ID: "1", Identifier: "octo/widgets#1", Title: "Task", State: "Open"},
+		Issue:         model.Issue{ID: "1", Identifier: "octo/widgets#1", Title: "Task", State: "Open"},
 		WorkspacePath: "/tmp/workspaces/octo_widgets_1",
-		StartedAt: now,
-		Session: model.LiveSession{SessionID: "session-1", TurnCount: 2, LastAgentEvent: "prompt_completed", LastAgentMessage: "done", CopilotTotalTokens: 33},
-		RecentEvents: []IssueEvent{{At: now, Event: "prompt_completed", Message: "done"}},
+		StartedAt:     now,
+		Session:       model.LiveSession{SessionID: "session-1", TurnCount: 2, LastAgentEvent: "prompt_completed", LastAgentMessage: "done", CopilotTotalTokens: 33},
+		RecentEvents:  []IssueEvent{{At: now, Event: "prompt_completed", Message: "done"}},
 	}
 	orchestrator.state.retryAttempts["2"] = &retryState{entry: model.RetryEntry{IssueID: "2", Identifier: "octo/widgets#2", Attempt: 3, DueAt: now.Add(time.Minute), Error: "retry error"}, timer: time.NewTimer(time.Hour)}
 	orchestrator.mu.Unlock()

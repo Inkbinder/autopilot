@@ -11,9 +11,9 @@ import (
 	"sync"
 	"time"
 
-	"autopilot/internal/copilot"
-	"autopilot/internal/model"
-	"autopilot/internal/workflow"
+	"github.com/Inkbinder/autopilot/internal/copilot"
+	"github.com/Inkbinder/autopilot/internal/model"
+	"github.com/Inkbinder/autopilot/internal/workflow"
 )
 
 const defaultFallbackPrompt = "You are working on an issue from GitHub."
@@ -24,7 +24,7 @@ type Orchestrator struct {
 	builder      DependencyBuilder
 	portOverride *int
 
-	mu        sync.Mutex
+	mu         sync.Mutex
 	definition workflow.Definition
 	config     workflow.Config
 	tracker    IssueTracker
@@ -52,17 +52,17 @@ type runtimeState struct {
 }
 
 type runningEntry struct {
-	Issue          model.Issue
-	WorkspacePath  string
-	StartedAt      time.Time
-	RetryAttempt   int
-	Session        model.LiveSession
-	RecentEvents   []IssueEvent
-	Cancel         context.CancelFunc
-	StopReason     string
+	Issue            model.Issue
+	WorkspacePath    string
+	StartedAt        time.Time
+	RetryAttempt     int
+	Session          model.LiveSession
+	RecentEvents     []IssueEvent
+	Cancel           context.CancelFunc
+	StopReason       string
 	CleanupWorkspace bool
-	LastError      string
-	RestartCount   int
+	LastError        string
+	RestartCount     int
 }
 
 type retryState struct {
@@ -77,12 +77,12 @@ type IssueEvent struct {
 }
 
 type Snapshot struct {
-	GeneratedAt   time.Time               `json:"generated_at"`
-	Counts        SnapshotCounts         `json:"counts"`
-	Running       []RunningSnapshot      `json:"running"`
-	Retrying      []RetrySnapshot        `json:"retrying"`
-	CopilotTotals model.CopilotTotals    `json:"copilot_totals"`
-	RateLimits    any                    `json:"rate_limits"`
+	GeneratedAt   time.Time           `json:"generated_at"`
+	Counts        SnapshotCounts      `json:"counts"`
+	Running       []RunningSnapshot   `json:"running"`
+	Retrying      []RetrySnapshot     `json:"retrying"`
+	CopilotTotals model.CopilotTotals `json:"copilot_totals"`
+	RateLimits    any                 `json:"rate_limits"`
 }
 
 type SnapshotCounts struct {
@@ -115,17 +115,17 @@ type RetrySnapshot struct {
 }
 
 type IssueDetail struct {
-	IssueIdentifier string                 `json:"issue_identifier"`
-	IssueID         string                 `json:"issue_id"`
-	Status          string                 `json:"status"`
-	Workspace       map[string]string      `json:"workspace,omitempty"`
-	Attempts        map[string]int         `json:"attempts,omitempty"`
-	Running         *RunningSnapshot       `json:"running,omitempty"`
-	Retry           *RetrySnapshot         `json:"retry,omitempty"`
-	Logs            map[string]any         `json:"logs,omitempty"`
-	RecentEvents    []IssueEvent           `json:"recent_events,omitempty"`
-	LastError       *string                `json:"last_error,omitempty"`
-	Tracked         map[string]any         `json:"tracked,omitempty"`
+	IssueIdentifier string            `json:"issue_identifier"`
+	IssueID         string            `json:"issue_id"`
+	Status          string            `json:"status"`
+	Workspace       map[string]string `json:"workspace,omitempty"`
+	Attempts        map[string]int    `json:"attempts,omitempty"`
+	Running         *RunningSnapshot  `json:"running,omitempty"`
+	Retry           *RetrySnapshot    `json:"retry,omitempty"`
+	Logs            map[string]any    `json:"logs,omitempty"`
+	RecentEvents    []IssueEvent      `json:"recent_events,omitempty"`
+	LastError       *string           `json:"last_error,omitempty"`
+	Tracked         map[string]any    `json:"tracked,omitempty"`
 }
 
 func New(workflowPath string, options Options) (*Orchestrator, error) {
@@ -280,10 +280,10 @@ func (orchestrator *Orchestrator) claimForDispatch(issue model.Issue, attempt *i
 		delete(orchestrator.state.retryAttempts, issue.ID)
 	}
 	orchestrator.state.running[issue.ID] = &runningEntry{
-		Issue:         issue,
-		StartedAt:     time.Now().UTC(),
-		RetryAttempt:  retryAttempt,
-		RestartCount:  retryAttempt,
+		Issue:        issue,
+		StartedAt:    time.Now().UTC(),
+		RetryAttempt: retryAttempt,
+		RestartCount: retryAttempt,
 		Session: model.LiveSession{
 			Transport: orchestrator.config.Copilot.Transport,
 		},
@@ -413,9 +413,9 @@ func (orchestrator *Orchestrator) runWorker(ctx context.Context, definition work
 }
 
 type workerOutcome struct {
-	Issue   model.Issue
-	Normal  bool
-	Err     error
+	Issue  model.Issue
+	Normal bool
+	Err    error
 }
 
 func (orchestrator *Orchestrator) handleWorkerOutcome(issueID string, outcome workerOutcome) {
@@ -757,12 +757,12 @@ func (orchestrator *Orchestrator) Snapshot() Snapshot {
 	sort.SliceStable(running, func(left int, right int) bool { return running[left].Identifier < running[right].Identifier })
 	sort.SliceStable(retrying, func(left int, right int) bool { return retrying[left].Identifier < retrying[right].Identifier })
 	return Snapshot{
-		GeneratedAt: now,
-		Counts: SnapshotCounts{Running: len(running), Retrying: len(retrying)},
-		Running: running,
-		Retrying: retrying,
+		GeneratedAt:   now,
+		Counts:        SnapshotCounts{Running: len(running), Retrying: len(retrying)},
+		Running:       running,
+		Retrying:      retrying,
 		CopilotTotals: totals,
-		RateLimits: orchestrator.state.copilotRateLimits,
+		RateLimits:    orchestrator.state.copilotRateLimits,
 	}
 }
 
@@ -773,13 +773,13 @@ func (orchestrator *Orchestrator) IssueDetail(issueIdentifier string) (IssueDeta
 		if entry.Issue.Identifier == issueIdentifier {
 			detail := IssueDetail{
 				IssueIdentifier: issueIdentifier,
-				IssueID: entry.Issue.ID,
-				Status: "running",
-				Workspace: map[string]string{"path": entry.WorkspacePath},
-				Attempts: map[string]int{"restart_count": entry.RestartCount, "current_retry_attempt": entry.RetryAttempt},
-				Running: ptrRunningSnapshot(runningSnapshotForEntry(entry)),
-				RecentEvents: append([]IssueEvent(nil), entry.RecentEvents...),
-				Tracked: map[string]any{},
+				IssueID:         entry.Issue.ID,
+				Status:          "running",
+				Workspace:       map[string]string{"path": entry.WorkspacePath},
+				Attempts:        map[string]int{"restart_count": entry.RestartCount, "current_retry_attempt": entry.RetryAttempt},
+				Running:         ptrRunningSnapshot(runningSnapshotForEntry(entry)),
+				RecentEvents:    append([]IssueEvent(nil), entry.RecentEvents...),
+				Tracked:         map[string]any{},
 			}
 			if entry.LastError != "" {
 				lastError := entry.LastError
@@ -792,10 +792,10 @@ func (orchestrator *Orchestrator) IssueDetail(issueIdentifier string) (IssueDeta
 		if retry.entry.Identifier == issueIdentifier {
 			detail := IssueDetail{
 				IssueIdentifier: issueIdentifier,
-				IssueID: retry.entry.IssueID,
-				Status: "retrying",
-				Retry: &RetrySnapshot{IssueID: retry.entry.IssueID, Identifier: retry.entry.Identifier, Attempt: retry.entry.Attempt, DueAt: retry.entry.DueAt, Error: retry.entry.Error},
-				Tracked: map[string]any{},
+				IssueID:         retry.entry.IssueID,
+				Status:          "retrying",
+				Retry:           &RetrySnapshot{IssueID: retry.entry.IssueID, Identifier: retry.entry.Identifier, Attempt: retry.entry.Attempt, DueAt: retry.entry.DueAt, Error: retry.entry.Error},
+				Tracked:         map[string]any{},
 			}
 			if retry.entry.Error != "" {
 				lastError := retry.entry.Error

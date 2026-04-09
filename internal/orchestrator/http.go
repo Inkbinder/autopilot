@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"autopilot/internal/workflow"
+	"github.com/Inkbinder/autopilot/internal/workflow"
 )
 
 type httpServer struct {
@@ -84,7 +84,7 @@ func (orchestrator *Orchestrator) handleDashboard(writer http.ResponseWriter, re
 	snapshot := orchestrator.Snapshot()
 	writer.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = dashboardTemplate.Execute(writer, map[string]any{
-		"Snapshot": snapshot,
+		"Snapshot":    snapshot,
 		"GeneratedAt": snapshot.GeneratedAt.Format(time.RFC3339),
 	})
 }
@@ -106,10 +106,10 @@ func (orchestrator *Orchestrator) handleRefresh(writer http.ResponseWriter, requ
 	}
 	coalesced := orchestrator.TriggerRefresh()
 	writeJSON(writer, http.StatusAccepted, map[string]any{
-		"queued": true,
-		"coalesced": coalesced,
+		"queued":       true,
+		"coalesced":    coalesced,
 		"requested_at": time.Now().UTC().Format(time.RFC3339),
-		"operations": []string{"poll", "reconcile"},
+		"operations":   []string{"poll", "reconcile"},
 	})
 }
 
@@ -143,7 +143,7 @@ func writeJSON(writer http.ResponseWriter, status int, payload any) {
 func writeJSONError(writer http.ResponseWriter, status int, code string, message string) {
 	writeJSON(writer, status, map[string]any{
 		"error": map[string]any{
-			"code": code,
+			"code":    code,
 			"message": message,
 		},
 	})

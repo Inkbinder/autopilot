@@ -7,6 +7,14 @@ It is a long-running Go service that polls GitHub issues, creates per-issue work
 
 Autopilot targets Go 1.26.
 
+If you want the binary without cloning the repository, install it with:
+
+```bash
+go install github.com/Inkbinder/autopilot/cmd/autopilot@latest
+```
+
+To pin an exact release, replace `latest` with a tag such as `v0.1.0`. The binary is installed to `$(go env GOBIN)` or, if `GOBIN` is unset, `$(go env GOPATH)/bin`, so make sure that directory is on your `PATH`.
+
 For development and test work in this repository, start with:
 
 - Go 1.26
@@ -54,12 +62,12 @@ For standard use, especially if you are starting from [example/WORKFLOW.md](exam
 - the GitHub Copilot CLI installed and authenticated as `copilot`, or an alternate command configured through `copilot.command`
 - a GitHub token supplied through `GITHUB_TOKEN` or `tracker.api_key`
 
-A good starting point is [example/WORKFLOW.md](example/WORKFLOW.md). Copy it to the repository root as `WORKFLOW.md`, replace `YOUR_ORG/YOUR_REPO`, and update the workspace root and `hooks.after_create` clone command for your environment. The example workflow uses the default `acp_stdio` Copilot transport, dispatches issues with labels such as `autopilot:ready`, and skips issues marked `autopilot:human-review`, `autopilot:blocked`, or `autopilot:question`.
+A good starting point is [example/WORKFLOW.md](example/WORKFLOW.md). Copy it to the repository root as `WORKFLOW.md`, replace `YOUR_ORG/YOUR_REPO`, and update the workspace root and `hooks.after_create` clone command for your environment. If you installed Autopilot with `go install`, clone or download [example/WORKFLOW.md](example/WORKFLOW.md) and the bundled skills under [example/.agents/skills](example/.agents/skills) separately before first run. The example workflow uses the default `acp_stdio` Copilot transport, dispatches issues with labels such as `autopilot:ready`, and skips issues marked `autopilot:human-review`, `autopilot:blocked`, or `autopilot:question`.
 
-Run with the default root workflow file:
+Run an installed binary with the default root workflow file:
 
 ```bash
-go run ./cmd/autopilot
+autopilot
 ```
 
 Run a built binary:
@@ -68,13 +76,31 @@ Run a built binary:
 ./bin/autopilot
 ```
 
-Run with an explicit workflow path:
+From a repository checkout, run without installing:
+
+```bash
+go run ./cmd/autopilot
+```
+
+Run an installed binary with an explicit workflow path:
+
+```bash
+autopilot ./path/to/WORKFLOW.md
+```
+
+From a repository checkout, run with an explicit workflow path:
 
 ```bash
 go run ./cmd/autopilot ./path/to/WORKFLOW.md
 ```
 
-Override the local status server port from the command line:
+Override the local status server port from the command line with an installed binary:
+
+```bash
+autopilot -port 8080 ./WORKFLOW.md
+```
+
+From a repository checkout, the equivalent command is:
 
 ```bash
 go run ./cmd/autopilot -port 8080 ./WORKFLOW.md

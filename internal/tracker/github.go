@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"autopilot/internal/model"
-	"autopilot/internal/workflow"
+	"github.com/Inkbinder/autopilot/internal/model"
+	"github.com/Inkbinder/autopilot/internal/workflow"
 )
 
 const defaultPageSize = 50
@@ -207,15 +207,15 @@ type issueStatesResponse struct {
 }
 
 type issueNode struct {
-	Typename  string `json:"__typename"`
-	ID        string `json:"id"`
-	Number    int    `json:"number"`
-	Title     string `json:"title"`
-	Body      string `json:"body"`
-	State     string `json:"state"`
-	URL       string `json:"url"`
-	CreatedAt string `json:"createdAt"`
-	UpdatedAt string `json:"updatedAt"`
+	Typename   string `json:"__typename"`
+	ID         string `json:"id"`
+	Number     int    `json:"number"`
+	Title      string `json:"title"`
+	Body       string `json:"body"`
+	State      string `json:"state"`
+	URL        string `json:"url"`
+	CreatedAt  string `json:"createdAt"`
+	UpdatedAt  string `json:"updatedAt"`
 	Repository struct {
 		Name  string `json:"name"`
 		Owner struct {

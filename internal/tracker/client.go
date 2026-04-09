@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"net/http"
 
-	"autopilot/internal/model"
-	"autopilot/internal/workflow"
+	"github.com/Inkbinder/autopilot/internal/model"
+	"github.com/Inkbinder/autopilot/internal/workflow"
 )
 
 type Client interface {

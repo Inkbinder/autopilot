@@ -5,11 +5,11 @@ import (
 	"log/slog"
 	"net/http"
 
-	"autopilot/internal/copilot"
-	"autopilot/internal/model"
-	"autopilot/internal/tracker"
-	"autopilot/internal/workflow"
-	workspacepkg "autopilot/internal/workspace"
+	"github.com/Inkbinder/autopilot/internal/copilot"
+	"github.com/Inkbinder/autopilot/internal/model"
+	"github.com/Inkbinder/autopilot/internal/tracker"
+	"github.com/Inkbinder/autopilot/internal/workflow"
+	workspacepkg "github.com/Inkbinder/autopilot/internal/workspace"
 )
 
 type IssueTracker interface {

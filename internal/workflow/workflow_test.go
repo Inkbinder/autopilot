@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"autopilot/internal/model"
+	"github.com/Inkbinder/autopilot/internal/model"
 )
 
 func TestLoadDefinitionParsesFrontMatterAndPrompt(t *testing.T) {
@@ -56,9 +56,9 @@ func TestResolveConfigAppliesDefaultsAndEnv(t *testing.T) {
 	t.Parallel()
 	definition := Definition{Config: map[string]any{
 		"tracker": map[string]any{
-			"kind": "github",
+			"kind":       "github",
 			"repository": "octo/widgets",
-			"api_key": "$TOKEN",
+			"api_key":    "$TOKEN",
 		},
 		"workspace": map[string]any{
 			"root": "$WORKROOT/subdir",

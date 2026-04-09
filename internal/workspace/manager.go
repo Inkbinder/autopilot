@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"autopilot/internal/model"
-	"autopilot/internal/workflow"
+	"github.com/Inkbinder/autopilot/internal/model"
+	"github.com/Inkbinder/autopilot/internal/workflow"
 )
 
 var workspaceKeyPattern = regexp.MustCompile(`[^A-Za-z0-9._-]`)

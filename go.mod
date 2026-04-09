@@ -1,4 +1,4 @@
-module autopilot
+module github.com/Inkbinder/autopilot
 
 go 1.26
 

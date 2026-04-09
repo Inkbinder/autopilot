@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"autopilot/internal/workflow"
+	"github.com/Inkbinder/autopilot/internal/workflow"
 )
 
 func TestACPStdioClientSessionAndPrompt(t *testing.T) {

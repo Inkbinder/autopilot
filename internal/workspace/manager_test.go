@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"autopilot/internal/workflow"
+	"github.com/Inkbinder/autopilot/internal/workflow"
 )
 
 type recordingRunner struct {
@@ -34,7 +34,7 @@ func TestManagerCreateForIssueSanitizesAndRunsAfterCreateOnce(t *testing.T) {
 	runner := &recordingRunner{}
 	manager, err := NewManager(workflow.Config{
 		Workspace: workflow.WorkspaceConfig{Root: root},
-		Hooks: workflow.HooksConfig{AfterCreate: "echo create"},
+		Hooks:     workflow.HooksConfig{AfterCreate: "echo create"},
 	}, runner)
 	if err != nil {
 		t.Fatalf("NewManager() error = %v", err)
@@ -71,7 +71,7 @@ func TestManagerPrepareForRunRemovesTransientArtifactsAndRunsBeforeRun(t *testin
 	runner := &recordingRunner{}
 	manager, err := NewManager(workflow.Config{
 		Workspace: workflow.WorkspaceConfig{Root: root},
-		Hooks: workflow.HooksConfig{BeforeRun: "echo before"},
+		Hooks:     workflow.HooksConfig{BeforeRun: "echo before"},
 	}, runner)
 	if err != nil {
 		t.Fatalf("NewManager() error = %v", err)

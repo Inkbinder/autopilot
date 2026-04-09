@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"autopilot/internal/workflow"
+	"github.com/Inkbinder/autopilot/internal/workflow"
 )
 
 func TestGitHubClientFetchCandidateIssuesFiltersLabelsAndPaginates(t *testing.T) {
@@ -34,7 +34,7 @@ func TestGitHubClientFetchCandidateIssuesFiltersLabelsAndPaginates(t *testing.T)
 			"data": map[string]any{
 				"search": map[string]any{
 					"pageInfo": map[string]any{"hasNextPage": false, "endCursor": nil},
-					"nodes": []map[string]any{},
+					"nodes":    []map[string]any{},
 				},
 			},
 		}
@@ -161,16 +161,16 @@ func issueNodeFixture(id string, number int, title string, labels []string, stat
 	}
 	return map[string]any{
 		"__typename": "Issue",
-		"id": id,
-		"number": number,
-		"title": title,
-		"body": "body",
-		"state": state,
-		"url": "https://example.test/issue",
-		"createdAt": time.Date(2026, 1, number%28+1, 10, 0, 0, 0, time.UTC).Format(time.RFC3339),
-		"updatedAt": time.Date(2026, 1, number%28+1, 11, 0, 0, 0, time.UTC).Format(time.RFC3339),
+		"id":         id,
+		"number":     number,
+		"title":      title,
+		"body":       "body",
+		"state":      state,
+		"url":        "https://example.test/issue",
+		"createdAt":  time.Date(2026, 1, number%28+1, 10, 0, 0, 0, time.UTC).Format(time.RFC3339),
+		"updatedAt":  time.Date(2026, 1, number%28+1, 11, 0, 0, 0, time.UTC).Format(time.RFC3339),
 		"repository": map[string]any{
-			"name": "widgets",
+			"name":  "widgets",
 			"owner": map[string]any{"login": "octo"},
 		},
 		"labels": map[string]any{"nodes": labelNodes},

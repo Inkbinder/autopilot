@@ -5,7 +5,7 @@ import (
 
 	"github.com/osteele/liquid"
 
-	"autopilot/internal/model"
+	"github.com/Inkbinder/autopilot/internal/model"
 )
 
 type Template struct {
