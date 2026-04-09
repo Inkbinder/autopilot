@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Autopilot Demo Todo App</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: "Segoe UI", Helvetica, Arial, sans-serif;
+        background: linear-gradient(180deg, #f7f7f2 0%, #efe6d6 100%);
+        color: #18222f;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        background:
+          radial-gradient(circle at top right, rgba(243, 185, 84, 0.35), transparent 28%),
+          radial-gradient(circle at bottom left, rgba(40, 108, 148, 0.2), transparent 26%),
+          linear-gradient(180deg, #f7f7f2 0%, #efe6d6 100%);
+      }
+    </style>
+  </head>
+  <body>
+    <todo-app></todo-app>
+    <script type="module" src="./src/todo-app.js"></script>
+  </body>
+</html>

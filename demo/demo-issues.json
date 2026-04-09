@@ -1,0 +1,37 @@
+[
+  {
+    "title": "Build the shell and composer web component",
+    "labels": [
+      "demo"
+    ],
+    "body": "## Goal\n\nThis is one of the parallel foundation tickets for the demo. Build a production-ready `todo-shell` web component with a real task composer, while keeping the work scoped so the other foundation issues can proceed in parallel on the list and state layers.\n\n## Acceptance Criteria\n\n- [ ] `src/components/todo-shell.js` provides the visible shell layout for the app using web components and plain JavaScript only.\n- [ ] The shell includes the app title, explanatory copy, a text input, and an add button.\n- [ ] Submitting a non-empty task dispatches a `todo-add` custom event whose detail contains the trimmed task title.\n- [ ] The shell keeps slots or similarly clean extension points for list content and status/footer content so later integration stays simple.\n- [ ] Tests cover the shell render plus successful submit behavior.\n\n## Validation\n\n- [ ] `npm test`\n- [ ] `npx serve . -l 4173` and verify the shell renders without a build step\n\n## Notes\n\n- This issue is intentionally parallel with the other foundation demo issues.\n- Keep changes centered on shell component files and related tests; do not wire persistence or the full app controller here."
+  },
+  {
+    "title": "Build the task list and task item web components",
+    "labels": [
+      "demo"
+    ],
+    "body": "## Goal\n\nThis is one of the parallel foundation tickets for the demo. Build the reusable list components that render tasks and emit interaction events, while keeping the work independent from the shell and persistence tracks.\n\n## Acceptance Criteria\n\n- [ ] `src/components/task-list.js` renders tasks supplied through a plain JavaScript property API.\n- [ ] `src/components/task-item.js` or equivalent list-item logic supports a completion toggle and a delete action.\n- [ ] The list emits `todo-toggle` and `todo-remove` custom events with task identifiers so the app root can integrate later.\n- [ ] The empty-state experience is preserved when no tasks are available.\n- [ ] Tests cover empty state, rendering of multiple tasks, toggle events, and delete events.\n\n## Validation\n\n- [ ] `npm test`\n- [ ] `npx serve . -l 4173` and verify the list components render from static files\n\n## Notes\n\n- This issue is intentionally parallel with the other foundation demo issues.\n- Keep changes centered on list component files and related tests; do not implement app-wide persistence or composer submission here."
+  },
+  {
+    "title": "Implement the TaskStore persistence and filtering layer",
+    "labels": [
+      "demo"
+    ],
+    "body": "## Goal\n\nThis is one of the parallel foundation tickets for the demo. Implement the plain JavaScript state layer that will back the web components, including local persistence and filtering helpers, without taking ownership of the UI composition.\n\n## Acceptance Criteria\n\n- [ ] `src/state/task-store.js` exports a plain JavaScript `TaskStore` API that manages task creation, toggle, delete, filter changes, and clear-completed behavior.\n- [ ] State is persisted through `localStorage` using an explicit storage key.\n- [ ] The store exposes enough state and helper methods for a root controller to render remaining count and filtered tasks cleanly.\n- [ ] The implementation remains independent from framework code and can be tested without a running UI.\n- [ ] Tests cover state transitions plus persistence round-trips.\n\n## Validation\n\n- [ ] `npm test`\n- [ ] demonstrate the store behavior through automated tests rather than manual UI-only validation\n\n## Notes\n\n- This issue is intentionally parallel with the other foundation demo issues.\n- Keep changes centered on the state layer and tests; do not build the full app controller here."
+  },
+  {
+    "title": "Integrate the shell, list, and store into a working to-do app",
+    "labels": [
+      "demo"
+    ],
+    "body": "## Goal\n\nThis is the first follow-on ticket after the parallel foundation work. Keep it in backlog until the shell, list, and state tickets are merged. Then wire the pieces together in the app root so the repository becomes a working to-do application.\n\n## Acceptance Criteria\n\n- [ ] `src/todo-app.js` integrates the shell component, list component, and `TaskStore` into a usable app.\n- [ ] Users can add tasks, toggle them complete, delete them, switch filters, clear completed items, and see a remaining-task count.\n- [ ] The app restores persisted state after a reload.\n- [ ] Tests cover the end-to-end app flow from the root component.\n- [ ] The finished app still runs directly from static files served with `npx serve .`.\n\n## Validation\n\n- [ ] `npm test`\n- [ ] `npx serve . -l 4173` and verify the full to-do flow in a browser\n\n## Notes\n\n- Expect the parallel foundation PRs to land first.\n- Prefer integration over redesign: use the component and store contracts built in the earlier tickets unless there is a clear correctness issue."
+  },
+  {
+    "title": "Polish accessibility, responsive layout, and demo documentation",
+    "labels": [
+      "demo"
+    ],
+    "body": "## Goal\n\nThis is the final polish ticket for the demo. Keep it in backlog until the integration issue is closed. Bring the app to a quality level that is easy to show to engineering leads after the earlier functional work is merged.\n\n## Acceptance Criteria\n\n- [ ] The experience is keyboard-friendly, with clear focus states and accessible labels for interactive controls.\n- [ ] The layout works cleanly on a narrow mobile viewport and on a wider desktop viewport.\n- [ ] Completed items are visually distinct without reducing readability.\n- [ ] The repository README explains how to install dependencies, run tests, and serve the finished app locally with `npx serve .`.\n- [ ] Tests are updated or extended anywhere accessibility-oriented behavior is practical to assert automatically.\n\n## Validation\n\n- [ ] `npm test`\n- [ ] `npx serve . -l 4173` and manually verify keyboard navigation plus a responsive desktop/mobile pass\n\n## Notes\n\n- Keep the visual direction intentional but lightweight.\n- Avoid introducing any frontend framework or build tooling."
+  }
+]
