@@ -379,6 +379,7 @@ Fields:
   - Optional.
   - Default: `autopilot:human-review`, `autopilot:blocked`, `autopilot:question`
   - If any configured label is present on the issue, the issue is not dispatch-eligible.
+  - Workflows may use `autopilot:question` to park issues with unresolved requirement, scope, or product-intent ambiguity after posting clarification questions instead of letting the agent guess.
   - Compare configured values and issue labels after `lowercase`.
 
 #### 5.3.2 `polling` (object)
@@ -593,7 +594,7 @@ This section is intentionally redundant so a coding agent can implement the conf
 - `tracker.active_states`: list of strings, default `["Open"]`
 - `tracker.terminal_states`: list of strings, default `["Closed"]`
 - `tracker.dispatch_labels`: list of strings, default `["autopilot:ready", "autopilot:merging", "autopilot:in-progress", "autopilot:rework"]`; any matching label makes an open issue eligible for dispatch
-- `tracker.excluded_labels`: list of strings, default `["autopilot:human-review", "autopilot:blocked", "autopilot:question"]`; any matching label makes an issue ineligible for dispatch
+- `tracker.excluded_labels`: list of strings, default `["autopilot:human-review", "autopilot:blocked", "autopilot:question"]`; any matching label makes an issue ineligible for dispatch. Example workflows may use `autopilot:question` to pause redispatch while clarification questions are open.
 - `polling.interval_ms`: integer, default `30000`
 - `workspace.provider`: string, default `local`; current runtime values `local` and `docker`
 - `workspace.root`: path, default `<system-temp>/autopilot_workspaces`

@@ -65,9 +65,9 @@ No description provided.
 
 Instructions:
 
-1. This is an unattended orchestration session. Never ask a human to perform follow-up actions.
-2. Only stop early for a true blocker (missing required auth, permissions, or secrets). If blocked, record it in the workpad, add the blocker label, and stop.
-3. Final message must report completed actions and blockers only. Do not include "next steps for user".
+1. This is an unattended orchestration session. Do not ask a human to perform repository work, debugging steps, or validation steps. If requirements are ambiguous, use the `clarify` skill to ask concise questions on the issue instead of making assumptions.
+2. Only stop early for unresolved ambiguity handled via the `clarify` skill, or a true blocker (missing required auth, permissions, or secrets). If blocked by access or tools, record it in the workpad, add the blocker label, and stop.
+3. Final message must report completed actions, blockers, assumptions derived from implication, and clarification requests only. Do not include "next steps for user".
 
 Work only in the provided repository copy. Do not touch any other path.
 
@@ -84,6 +84,8 @@ Use the `github` skill for issue labels, issue comments, PR metadata, review ins
 - Only `autopilot:ready`, `autopilot:in-progress`, `autopilot:rework`, and `autopilot:merging` are dispatch labels. `autopilot:human-review`, `autopilot:blocked`, and `autopilot:question` intentionally suppress dispatch until a human or separate automation changes the labels.
 - Do not assume changing a label will interrupt a currently running agent turn. Label changes control future routing and redispatch; a live run normally stops only when the issue closes, becomes inactive by workflow policy, or the current attempt ends.
 - Use repo-local Copilot skills from `.agents/skills/` when relevant; they are part of the expected operating model for this workflow.
+- When required behavior, acceptance criteria, product intent, review intent, or scope is ambiguous enough that multiple reasonable implementations exist, do not choose one silently. Use the `clarify` skill before code changes or review replies that depend on the missing decision.
+- When `autopilot:question` is added, leave the lifecycle label unchanged, update the workpad and issue with the exact questions asked, and then stop the current attempt.
 - Start every task by opening the tracking workpad comment and bringing it up to date before doing new implementation work.
 - Spend extra effort up front on planning and verification design before implementation.
 - Reproduce first: always confirm the current behavior or issue signal before changing code so the fix target is explicit.
@@ -99,6 +101,7 @@ Use the `github` skill for issue labels, issue comments, PR metadata, review ins
 ## Related skills
 
 - `github`: interact with GitHub issues, labels, comments, PR metadata, checks, and review threads.
+- `clarify`: ask GitHub issue clarification questions, update the workpad, apply `autopilot:question`, and pause the current attempt without guessing.
 - `commit`: create a well-formed commit from the current change set.
 - `push`: publish the current branch and create or update the pull request.
 - `pull`: merge latest `origin/main` into the current branch and resolve conflicts.
@@ -161,7 +164,7 @@ Use the `github` skill for issue labels, issue comments, PR metadata, review ins
    - If changes are user-facing, include a UI walkthrough acceptance criterion that describes the end-to-end user path to validate.
    - If changes touch app files or app behavior, add explicit app-specific flow checks to `Acceptance Criteria` in the workpad.
    - If the issue description or comments include `Validation`, `Test Plan`, or `Testing` sections, copy those requirements into the workpad `Acceptance Criteria` and `Validation` sections as required checkboxes.
-7. Run a principal-style self-review of the plan and refine it in the comment.
+7. Run a principal-style self-review of the plan and refine it in the comment. If unresolved ambiguity remains after that review, use the `clarify` skill before code changes.
 8. Before implementing, capture a concrete reproduction signal and record it in the workpad `Notes` section (command output, screenshot, or deterministic UI behavior).
 9. Run the `pull` skill to sync with latest `origin/main` before any code edits, then record the sync result in the workpad `Notes`.
    - Include a `pull skill evidence` note with:
@@ -211,6 +214,7 @@ Use this only when completion is blocked by missing required tools or missing au
    - Keep parent and child structure intact as scope evolves.
    - Update the workpad immediately after each meaningful milestone (for example: reproduction complete, code change landed, validation run, review feedback addressed).
    - Never leave completed work unchecked in the plan.
+   - If new ambiguity appears mid-execution and multiple reasonable implementations exist, stop and use the `clarify` skill instead of making an implementation-defined choice.
    - For issues that started as `Todo` with an attached PR, run the full PR feedback sweep protocol immediately after kickoff and before new feature work.
 5. Run validation and tests required for the scope.
    - Mandatory gate: execute all issue-provided `Validation`, `Test Plan`, or `Testing` requirements when present; treat unmet items as incomplete work.
@@ -289,6 +293,7 @@ Use this only when completion is blocked by missing required tools or missing au
 - Do not move to `Human Review` unless the `Completion bar before Human Review` is satisfied.
 - In `Human Review`, do not make changes; wait and poll.
 - Do not assume a label change immediately stops a live run. Use labels to control the next dispatch and handoff state.
+- Do not make implementation-defined assumptions when required behavior, acceptance criteria, scope, product intent, or review intent is ambiguous; use the `clarify` skill and add `autopilot:question` instead.
 - If a run stalls, retries repeatedly, or fails unexpectedly, use the `debug` skill before changing workflow labels or restarting manually.
 - Keep issue text concise, specific, and reviewer-oriented.
 - If blocked and no workpad exists yet, add one blocker comment describing blocker, impact, and next unblock action, then apply `autopilot:blocked`.

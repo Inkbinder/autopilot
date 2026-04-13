@@ -35,7 +35,7 @@ description:
 10. When all checks are green and review feedback is addressed, squash-merge using the PR title/body unless repo policy requires a different merge method.
 11. **Context guard:** Before implementing review feedback, confirm it does not conflict with the user’s stated intent or task context. If it conflicts, respond inline with a justification and ask before changing code.
 12. **Pushback template:** When disagreeing, reply inline with acknowledge + rationale + alternative.
-13. **Ambiguity gate:** When ambiguity blocks progress, use the clarification flow. Do not implement until ambiguity is resolved.
+13. **Ambiguity gate:** When ambiguity blocks progress, use the `clarify` skill to update the workpad, ask the needed issue questions, add `autopilot:question`, and stop. Do not implement until ambiguity is resolved.
 14. **Per-comment mode:** For each review comment, choose one of: accept, clarify, or push back. Reply before changing code.
 15. **Reply before change:** Always respond with intended action before pushing code changes.
 
