@@ -61,4 +61,32 @@ func TestSQLiteStoreCreateUpdateAndAudit(t *testing.T) {
 	if payload != `{"prompt":"do work"}` {
 		t.Fatalf("payload = %q", payload)
 	}
+
+	runs, err := store.ListRuns(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("ListRuns() error = %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("ListRuns() length = %d, want 1", len(runs))
+	}
+	if runs[0].ID != runID || runs[0].Status != StatusFailed {
+		t.Fatalf("ListRuns() first run = %#v", runs[0])
+	}
+
+	detail, ok, err := store.GetRun(context.Background(), runID)
+	if err != nil {
+		t.Fatalf("GetRun() error = %v", err)
+	}
+	if !ok {
+		t.Fatal("GetRun() ok = false, want true")
+	}
+	if detail.ID != runID {
+		t.Fatalf("GetRun() id = %d, want %d", detail.ID, runID)
+	}
+	if len(detail.AuditEvents) != 1 {
+		t.Fatalf("GetRun() audit event count = %d, want 1", len(detail.AuditEvents))
+	}
+	if string(detail.AuditEvents[0].Payload) != `{"prompt":"do work"}` {
+		t.Fatalf("GetRun() payload = %s", detail.AuditEvents[0].Payload)
+	}
 }

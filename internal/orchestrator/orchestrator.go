@@ -96,6 +96,7 @@ type SnapshotCounts struct {
 }
 
 type RunningSnapshot struct {
+	RunID         int64               `json:"run_id,omitempty"`
 	IssueID       string              `json:"issue_id"`
 	Identifier    string              `json:"issue_identifier"`
 	State         string              `json:"state"`
@@ -259,18 +260,18 @@ func (orchestrator *Orchestrator) tick(ctx context.Context) {
 
 func (orchestrator *Orchestrator) dispatchIfEligible(ctx context.Context, issue model.Issue, attempt *int) bool {
 	startedAt := time.Now().UTC()
-	definition, config, trackerClient, workspaceManager, copilotClient, allowed := orchestrator.claimForDispatch(issue, attempt, startedAt)
+	definition, config, trackerClient, workspaceManager, copilotClient, retryAttempt, allowed := orchestrator.claimForDispatch(issue, attempt)
 	if !allowed {
 		return false
 	}
-	runID := orchestrator.createRunRecord(ctx, config.Tracker.Repository, issue, startedAt)
+	runID, err := orchestrator.createRunRecord(ctx, config.Tracker.Repository, issue, startedAt)
+	if err != nil {
+		orchestrator.releaseClaim(issue.ID)
+		return false
+	}
 	workerCtx, cancel := context.WithCancel(ctx)
 	workerCtx = runstate.WithMetadata(workerCtx, runstate.Metadata{RunID: runID, IssueID: issue.ID, Repo: config.Tracker.Repository})
-	orchestrator.mu.Lock()
-	entry := orchestrator.state.running[issue.ID]
-	entry.RunID = runID
-	entry.Cancel = cancel
-	orchestrator.mu.Unlock()
+	orchestrator.registerRunningEntry(issue, config.Tracker.Repository, runID, startedAt, retryAttempt, config.Copilot.Transport, cancel)
 
 	orchestrator.wg.Add(1)
 	go func() {
@@ -280,11 +281,11 @@ func (orchestrator *Orchestrator) dispatchIfEligible(ctx context.Context, issue 
 	return true
 }
 
-func (orchestrator *Orchestrator) claimForDispatch(issue model.Issue, attempt *int, startedAt time.Time) (workflow.Definition, workflow.Config, IssueTracker, WorkspaceManager, copilot.Client, bool) {
+func (orchestrator *Orchestrator) claimForDispatch(issue model.Issue, attempt *int) (workflow.Definition, workflow.Config, IssueTracker, WorkspaceManager, copilot.Client, int, bool) {
 	orchestrator.mu.Lock()
 	defer orchestrator.mu.Unlock()
 	if !orchestrator.isEligibleLocked(issue, attempt != nil) {
-		return workflow.Definition{}, workflow.Config{}, nil, nil, nil, false
+		return workflow.Definition{}, workflow.Config{}, nil, nil, nil, 0, false
 	}
 	retryAttempt := 0
 	if attempt != nil {
@@ -295,17 +296,7 @@ func (orchestrator *Orchestrator) claimForDispatch(issue model.Issue, attempt *i
 		retry.timer.Stop()
 		delete(orchestrator.state.retryAttempts, issue.ID)
 	}
-	orchestrator.state.running[issue.ID] = &runningEntry{
-		Issue:        issue,
-		Repo:         orchestrator.config.Tracker.Repository,
-		StartedAt:    startedAt,
-		RetryAttempt: retryAttempt,
-		RestartCount: retryAttempt,
-		Session: model.LiveSession{
-			Transport: orchestrator.config.Copilot.Transport,
-		},
-	}
-	return orchestrator.definition, orchestrator.config, orchestrator.tracker, orchestrator.workspace, orchestrator.copilot, true
+	return orchestrator.definition, orchestrator.config, orchestrator.tracker, orchestrator.workspace, orchestrator.copilot, retryAttempt, true
 }
 
 func (orchestrator *Orchestrator) isEligibleLocked(issue model.Issue, allowClaimed bool) bool {
@@ -944,6 +935,7 @@ func (orchestrator *Orchestrator) shutdown(ctx context.Context) error {
 
 func runningSnapshotForEntry(entry *runningEntry) RunningSnapshot {
 	return RunningSnapshot{
+		RunID:         entry.RunID,
 		IssueID:       entry.Issue.ID,
 		Identifier:    entry.Issue.Identifier,
 		State:         entry.Issue.State,
@@ -1053,13 +1045,13 @@ func (orchestrator *Orchestrator) issueLogger(repo string, issue model.Issue) *s
 	return contextualLogger(orchestrator.baseLogger, repo, issue.ID).With(slog.String("issue_identifier", issue.Identifier))
 }
 
-func (orchestrator *Orchestrator) createRunRecord(ctx context.Context, repo string, issue model.Issue, startedAt time.Time) int64 {
+func (orchestrator *Orchestrator) createRunRecord(ctx context.Context, repo string, issue model.Issue, startedAt time.Time) (int64, error) {
 	runID, err := orchestrator.runStore.CreateRun(ctx, runstate.CreateRunParams{IssueID: issue.ID, Repo: repo, Status: runstate.StatusQueued, StartTime: startedAt})
 	if err != nil {
 		orchestrator.issueLogger(repo, issue).Warn("run record create failed", slog.Any("error", err))
-		return 0
+		return 0, err
 	}
-	return runID
+	return runID, nil
 }
 
 func (orchestrator *Orchestrator) updateRunStatus(ctx context.Context, repo string, issue model.Issue, status runstate.Status, errorMessage *string) {
@@ -1085,4 +1077,29 @@ func (orchestrator *Orchestrator) finishRunStatus(runID int64, repo string, issu
 	if err := orchestrator.runStore.UpdateRun(context.Background(), runstate.UpdateRunParams{RunID: runID, Status: status, EndTime: &finishedAt, ErrorMessage: errorMessage}); err != nil {
 		orchestrator.issueLogger(repo, issue).Warn("run record finalize failed", slog.Any("error", err), slog.String("status", string(status)))
 	}
+}
+
+func (orchestrator *Orchestrator) registerRunningEntry(issue model.Issue, repo string, runID int64, startedAt time.Time, retryAttempt int, transport string, cancel context.CancelFunc) {
+	orchestrator.mu.Lock()
+	defer orchestrator.mu.Unlock()
+	orchestrator.state.running[issue.ID] = &runningEntry{
+		Issue:        issue,
+		RunID:        runID,
+		Repo:         repo,
+		StartedAt:    startedAt,
+		RetryAttempt: retryAttempt,
+		RestartCount: retryAttempt,
+		Cancel:       cancel,
+		Session: model.LiveSession{
+			Transport: transport,
+		},
+	}
+}
+
+func (orchestrator *Orchestrator) historyReader() runstate.HistoryReader {
+	reader, ok := orchestrator.runStore.(runstate.HistoryReader)
+	if ok {
+		return reader
+	}
+	return runstate.NopStore{}
 }

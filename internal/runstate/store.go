@@ -21,8 +21,14 @@ type Writer interface {
 	InsertAuditEvent(ctx context.Context, event AuditEvent) error
 }
 
+type HistoryReader interface {
+	ListRuns(ctx context.Context, limit int) ([]RunRecord, error)
+	GetRun(ctx context.Context, runID int64) (RunDetail, bool, error)
+}
+
 type Store interface {
 	Writer
+	HistoryReader
 	Close() error
 }
 
@@ -47,6 +53,29 @@ type AuditEvent struct {
 	Payload    string
 }
 
+type RunRecord struct {
+	ID           int64      `json:"id"`
+	IssueID      string     `json:"issue_id"`
+	Repo         string     `json:"repo"`
+	Status       Status     `json:"status"`
+	StartTime    time.Time  `json:"start_time"`
+	EndTime      *time.Time `json:"end_time,omitempty"`
+	ErrorMessage *string    `json:"error_message,omitempty"`
+}
+
+type AuditEventRecord struct {
+	ID         int64           `json:"id"`
+	RunID      int64           `json:"run_id"`
+	Timestamp  time.Time       `json:"timestamp"`
+	ActionType string          `json:"action_type"`
+	Payload    json.RawMessage `json:"payload"`
+}
+
+type RunDetail struct {
+	RunRecord
+	AuditEvents []AuditEventRecord `json:"audit_events"`
+}
+
 type Metadata struct {
 	RunID   int64
 	IssueID string
@@ -67,6 +96,14 @@ func (NopStore) UpdateRun(context.Context, UpdateRunParams) error {
 
 func (NopStore) InsertAuditEvent(context.Context, AuditEvent) error {
 	return nil
+}
+
+func (NopStore) ListRuns(context.Context, int) ([]RunRecord, error) {
+	return []RunRecord{}, nil
+}
+
+func (NopStore) GetRun(context.Context, int64) (RunDetail, bool, error) {
+	return RunDetail{}, false, nil
 }
 
 func (NopStore) Close() error {

@@ -15,13 +15,14 @@ import (
 
 	"github.com/Inkbinder/autopilot/internal/copilot"
 	"github.com/Inkbinder/autopilot/internal/model"
+	"github.com/Inkbinder/autopilot/internal/runstate"
 	"github.com/Inkbinder/autopilot/internal/workflow"
 )
 
 type fakeBuilder struct {
-	tracker   *fakeTracker
-	workspace *fakeWorkspace
-	copilot   *fakeCopilot
+	tracker   IssueTracker
+	workspace WorkspaceManager
+	copilot   copilot.Client
 }
 
 func (builder fakeBuilder) Build(_ workflow.Config) (IssueTracker, WorkspaceManager, copilot.Client, error) {
@@ -119,6 +120,41 @@ func (session *fakeSession) RunPrompt(_ context.Context, prompt string, turn int
 	return nil
 }
 func (session *fakeSession) Close(context.Context) error { return nil }
+
+type blockingCopilot struct {
+	started chan struct{}
+	release chan struct{}
+	onEvent copilot.EventHandler
+	one     sync.Once
+}
+
+func (client *blockingCopilot) StartSession(_ context.Context, request copilot.StartRequest) (copilot.Session, error) {
+	client.onEvent = request.OnEvent
+	if client.onEvent != nil {
+		client.onEvent(copilot.Event{Event: "session_started", Timestamp: time.Now().UTC(), SessionID: "blocking-session", Turn: 0})
+	}
+	return &blockingSession{client: client}, nil
+}
+
+type blockingSession struct {
+	client *blockingCopilot
+}
+
+func (session *blockingSession) ID() string        { return "blocking-session" }
+func (session *blockingSession) Transport() string { return "acp_stdio" }
+func (session *blockingSession) ProcessID() *int   { return nil }
+func (session *blockingSession) RunPrompt(_ context.Context, _ string, turn int) error {
+	session.client.one.Do(func() {
+		close(session.client.started)
+	})
+	<-session.client.release
+	if session.client.onEvent != nil {
+		session.client.onEvent(copilot.Event{Event: "notification", Timestamp: time.Now().UTC(), SessionID: "blocking-session", Turn: turn, Message: "working"})
+		session.client.onEvent(copilot.Event{Event: "prompt_completed", Timestamp: time.Now().UTC(), SessionID: "blocking-session", Turn: turn})
+	}
+	return nil
+}
+func (session *blockingSession) Close(context.Context) error { return nil }
 
 func TestOrchestratorTickDispatchesAndQueuesContinuationRetry(t *testing.T) {
 	t.Parallel()
@@ -291,13 +327,32 @@ func TestRunWorkerStopsOnRateLimitNotification(t *testing.T) {
 func TestHTTPHandlersServeStateRefreshAndIssueDetail(t *testing.T) {
 	t.Parallel()
 	workflowPath := writeWorkflowFile(t)
-	orchestrator, err := New(workflowPath, Options{Builder: fakeBuilder{tracker: &fakeTracker{}, workspace: &fakeWorkspace{root: t.TempDir()}, copilot: &fakeCopilot{}}})
+	store, err := runstate.OpenSQLite(filepath.Join(t.TempDir(), ".autopilot", "runs.db"))
+	if err != nil {
+		t.Fatalf("OpenSQLite() error = %v", err)
+	}
+	defer store.Close()
+	startedAt := time.Now().UTC().Add(-2 * time.Minute).Truncate(time.Second)
+	runID, err := store.CreateRun(context.Background(), runstate.CreateRunParams{IssueID: "1", Repo: "octo/widgets", Status: runstate.StatusRunning, StartTime: startedAt})
+	if err != nil {
+		t.Fatalf("CreateRun() error = %v", err)
+	}
+	finishedAt := startedAt.Add(time.Minute)
+	errorMessage := "audit trail"
+	if err := store.UpdateRun(context.Background(), runstate.UpdateRunParams{RunID: runID, Status: runstate.StatusFailed, EndTime: &finishedAt, ErrorMessage: &errorMessage}); err != nil {
+		t.Fatalf("UpdateRun() error = %v", err)
+	}
+	if err := store.InsertAuditEvent(context.Background(), runstate.AuditEvent{RunID: runID, Timestamp: startedAt.Add(30 * time.Second), ActionType: "workspace_exec", Payload: `{"command":"sh","output":"hello"}`}); err != nil {
+		t.Fatalf("InsertAuditEvent() error = %v", err)
+	}
+	orchestrator, err := New(workflowPath, Options{Builder: fakeBuilder{tracker: &fakeTracker{}, workspace: &fakeWorkspace{root: t.TempDir()}, copilot: &fakeCopilot{}}, RunStore: store})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
 	now := time.Now().UTC()
 	orchestrator.mu.Lock()
 	orchestrator.state.running["1"] = &runningEntry{
+		RunID:         runID,
 		Issue:         model.Issue{ID: "1", Identifier: "octo/widgets#1", Title: "Task", State: "Open"},
 		WorkspacePath: "/tmp/workspaces/octo_widgets_1",
 		StartedAt:     now,
@@ -332,8 +387,17 @@ func TestHTTPHandlersServeStateRefreshAndIssueDetail(t *testing.T) {
 	if !strings.Contains(dashboardBody, "/api/v1/state") {
 		t.Fatalf("dashboard missing state polling hook: %s", dashboardBody)
 	}
+	if !strings.Contains(dashboardBody, "/api/v1/runs") {
+		t.Fatalf("dashboard missing run history hook: %s", dashboardBody)
+	}
+	if !strings.Contains(dashboardBody, "/runs/"+strconv.FormatInt(runID, 10)) {
+		t.Fatalf("dashboard missing HTML run detail links: %s", dashboardBody)
+	}
 	if !strings.Contains(dashboardBody, "Auto-refreshing every") {
 		t.Fatalf("dashboard missing auto-refresh indicator: %s", dashboardBody)
+	}
+	if !strings.Contains(dashboardBody, "History") {
+		t.Fatalf("dashboard missing history section: %s", dashboardBody)
 	}
 
 	refreshRequest := httptest.NewRequest(http.MethodPost, "/api/v1/refresh", nil)
@@ -360,11 +424,164 @@ func TestHTTPHandlersServeStateRefreshAndIssueDetail(t *testing.T) {
 		t.Fatalf("unexpected running detail: %#v", detail.Running)
 	}
 
+	runsRequest := httptest.NewRequest(http.MethodGet, "/api/v1/runs", nil)
+	runsRecorder := httptest.NewRecorder()
+	orchestrator.handleRuns(runsRecorder, runsRequest)
+	if runsRecorder.Code != http.StatusOK {
+		t.Fatalf("runs status = %d body=%s", runsRecorder.Code, runsRecorder.Body.String())
+	}
+	var runs []runstate.RunRecord
+	if err := json.Unmarshal(runsRecorder.Body.Bytes(), &runs); err != nil {
+		t.Fatalf("json.Unmarshal(runs) error = %v", err)
+	}
+	if len(runs) != 1 || runs[0].ID != runID {
+		t.Fatalf("unexpected runs payload: %#v", runs)
+	}
+
+	runDetailRequest := httptest.NewRequest(http.MethodGet, "/api/v1/runs/"+strconv.FormatInt(runID, 10), nil)
+	runDetailRecorder := httptest.NewRecorder()
+	orchestrator.handleRun(runDetailRecorder, runDetailRequest)
+	if runDetailRecorder.Code != http.StatusOK {
+		t.Fatalf("run detail status = %d body=%s", runDetailRecorder.Code, runDetailRecorder.Body.String())
+	}
+	var runDetail runstate.RunDetail
+	if err := json.Unmarshal(runDetailRecorder.Body.Bytes(), &runDetail); err != nil {
+		t.Fatalf("json.Unmarshal(run detail) error = %v", err)
+	}
+	if runDetail.ID != runID || len(runDetail.AuditEvents) != 1 {
+		t.Fatalf("unexpected run detail payload: %#v", runDetail)
+	}
+	if runDetail.AuditEvents[0].ActionType != "workspace_exec" {
+		t.Fatalf("unexpected audit event: %#v", runDetail.AuditEvents[0])
+	}
+
+	runPageRequest := httptest.NewRequest(http.MethodGet, "/runs/"+strconv.FormatInt(runID, 10), nil)
+	runPageRecorder := httptest.NewRecorder()
+	orchestrator.handleRunPage(runPageRecorder, runPageRequest)
+	if runPageRecorder.Code != http.StatusOK {
+		t.Fatalf("run page status = %d body=%s", runPageRecorder.Code, runPageRecorder.Body.String())
+	}
+	runPageBody := runPageRecorder.Body.String()
+	if !strings.Contains(runPageBody, "Back to Dashboard") {
+		t.Fatalf("run page missing dashboard navigation: %s", runPageBody)
+	}
+	if !strings.Contains(runPageBody, "Run #"+strconv.FormatInt(runID, 10)) {
+		t.Fatalf("run page missing run title: %s", runPageBody)
+	}
+	if !strings.Contains(runPageBody, "workspace_exec") {
+		t.Fatalf("run page missing audit timeline: %s", runPageBody)
+	}
+	if strings.Contains(runPageBody, runDetailReloadText) {
+		t.Fatalf("run page unexpectedly auto-refreshes completed runs: %s", runPageBody)
+	}
+
 	missingRequest := httptest.NewRequest(http.MethodGet, "/api/v1/octo/widgets%23999", nil)
 	missingRecorder := httptest.NewRecorder()
 	orchestrator.handleIssue(missingRecorder, missingRequest)
 	if missingRecorder.Code != http.StatusNotFound {
 		t.Fatalf("missing issue status = %d", missingRecorder.Code)
+	}
+}
+
+func TestDashboardRunningSessionWithoutRunIDRendersPlainIssueText(t *testing.T) {
+	t.Parallel()
+	workflowPath := writeWorkflowFile(t)
+	orchestrator, err := New(workflowPath, Options{Builder: fakeBuilder{tracker: &fakeTracker{}, workspace: &fakeWorkspace{root: t.TempDir()}, copilot: &fakeCopilot{}}})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer orchestrator.shutdown(context.Background())
+	now := time.Now().UTC()
+	orchestrator.mu.Lock()
+	orchestrator.state.running["1"] = &runningEntry{
+		Issue:         model.Issue{ID: "1", Identifier: "octo/widgets#1", Title: "Task", State: "Open"},
+		WorkspacePath: "/tmp/workspaces/octo_widgets_1",
+		StartedAt:     now,
+		Session:       model.LiveSession{SessionID: "session-1", LastAgentEvent: "session_started"},
+	}
+	orchestrator.mu.Unlock()
+
+	dashboardRequest := httptest.NewRequest(http.MethodGet, "/", nil)
+	dashboardRecorder := httptest.NewRecorder()
+	orchestrator.handleDashboard(dashboardRecorder, dashboardRequest)
+	if dashboardRecorder.Code != http.StatusOK {
+		t.Fatalf("dashboard status = %d", dashboardRecorder.Code)
+	}
+	body := dashboardRecorder.Body.String()
+	if !strings.Contains(body, `<code>octo/widgets#1</code>`) {
+		t.Fatalf("dashboard missing issue text: %s", body)
+	}
+	if strings.Contains(body, `href="/runs/1"`) {
+		t.Fatalf("dashboard unexpectedly rendered run link without run id: %s", body)
+	}
+}
+
+func TestDispatchPublishesRunningEntryWithRunID(t *testing.T) {
+	t.Parallel()
+	workflowPath := writeWorkflowFileWithMaxTurns(t, 1)
+	issue := model.Issue{ID: "1", Identifier: "octo/widgets#1", Title: "Task", State: "Open", Labels: []string{"autopilot:ready"}, BlockedBy: []model.BlockerRef{{Identifier: stringPtr("octo/widgets#2"), State: stringPtr("Closed")}}}
+	tracker := &fakeTracker{candidates: []model.Issue{issue}, statesByID: map[string]model.Issue{"1": issue}}
+	workspace := &fakeWorkspace{root: filepath.Join(t.TempDir(), "workspaces")}
+	client := &blockingCopilot{started: make(chan struct{}), release: make(chan struct{})}
+	orchestrator, err := New(workflowPath, Options{Builder: fakeBuilder{tracker: tracker, workspace: workspace, copilot: client}, RunStore: &runStoreRecorder{}})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer orchestrator.shutdown(context.Background())
+
+	orchestrator.tick(context.Background())
+	select {
+	case <-client.started:
+	case <-time.After(2 * time.Second):
+		close(client.release)
+		t.Fatal("worker did not start in time")
+	}
+
+	snapshot := orchestrator.Snapshot()
+	if len(snapshot.Running) != 1 {
+		close(client.release)
+		t.Fatalf("running count = %d, want 1", len(snapshot.Running))
+	}
+	if snapshot.Running[0].RunID == 0 {
+		close(client.release)
+		t.Fatalf("running snapshot missing run id: %#v", snapshot.Running[0])
+	}
+
+	close(client.release)
+	orchestrator.wg.Wait()
+}
+
+func TestRunPageAutoRefreshesActiveRuns(t *testing.T) {
+	t.Parallel()
+	workflowPath := writeWorkflowFile(t)
+	store, err := runstate.OpenSQLite(filepath.Join(t.TempDir(), ".autopilot", "runs.db"))
+	if err != nil {
+		t.Fatalf("OpenSQLite() error = %v", err)
+	}
+	defer store.Close()
+	startedAt := time.Now().UTC().Truncate(time.Second)
+	runID, err := store.CreateRun(context.Background(), runstate.CreateRunParams{IssueID: "1", Repo: "octo/widgets", Status: runstate.StatusRunning, StartTime: startedAt})
+	if err != nil {
+		t.Fatalf("CreateRun() error = %v", err)
+	}
+	orchestrator, err := New(workflowPath, Options{Builder: fakeBuilder{tracker: &fakeTracker{}, workspace: &fakeWorkspace{root: t.TempDir()}, copilot: &fakeCopilot{}}, RunStore: store})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer orchestrator.shutdown(context.Background())
+
+	runPageRequest := httptest.NewRequest(http.MethodGet, "/runs/"+strconv.FormatInt(runID, 10), nil)
+	runPageRecorder := httptest.NewRecorder()
+	orchestrator.handleRunPage(runPageRecorder, runPageRequest)
+	if runPageRecorder.Code != http.StatusOK {
+		t.Fatalf("run page status = %d body=%s", runPageRecorder.Code, runPageRecorder.Body.String())
+	}
+	body := runPageRecorder.Body.String()
+	if !strings.Contains(body, runDetailReloadText) {
+		t.Fatalf("running run page missing auto-refresh badge: %s", body)
+	}
+	if !strings.Contains(body, "window.location.reload()") {
+		t.Fatalf("running run page missing reload script: %s", body)
 	}
 }
 

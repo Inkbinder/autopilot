@@ -3,6 +3,7 @@ package runstate
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -97,6 +98,99 @@ func (store *SQLiteStore) InsertAuditEvent(ctx context.Context, event AuditEvent
 	return err
 }
 
+func (store *SQLiteStore) ListRuns(ctx context.Context, limit int) ([]RunRecord, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := store.db.QueryContext(
+		ctx,
+		`SELECT id, issue_id, repo, status, start_time, end_time, error_message
+		 FROM runs
+		 ORDER BY start_time DESC, id DESC
+		 LIMIT ?`,
+		limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	runs := make([]RunRecord, 0, limit)
+	for rows.Next() {
+		run, err := scanRunRecord(rows)
+		if err != nil {
+			return nil, err
+		}
+		runs = append(runs, run)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return runs, nil
+}
+
+func (store *SQLiteStore) GetRun(ctx context.Context, runID int64) (RunDetail, bool, error) {
+	if runID <= 0 {
+		return RunDetail{}, false, nil
+	}
+	row := store.db.QueryRowContext(
+		ctx,
+		`SELECT id, issue_id, repo, status, start_time, end_time, error_message
+		 FROM runs
+		 WHERE id = ?`,
+		runID,
+	)
+	run, err := scanRunRecord(row)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return RunDetail{}, false, nil
+		}
+		return RunDetail{}, false, err
+	}
+
+	eventRows, err := store.db.QueryContext(
+		ctx,
+		`SELECT id, run_id, timestamp, action_type, payload
+		 FROM audit_events
+		 WHERE run_id = ?
+		 ORDER BY timestamp ASC, id ASC`,
+		runID,
+	)
+	if err != nil {
+		return RunDetail{}, false, err
+	}
+	defer eventRows.Close()
+
+	events := make([]AuditEventRecord, 0)
+	for eventRows.Next() {
+		var (
+			id         int64
+			storedRun  int64
+			timestamp  string
+			actionType string
+			payload    string
+		)
+		if err := eventRows.Scan(&id, &storedRun, &timestamp, &actionType, &payload); err != nil {
+			return RunDetail{}, false, err
+		}
+		parsedTimestamp, err := parseStoredTime(timestamp)
+		if err != nil {
+			return RunDetail{}, false, err
+		}
+		events = append(events, AuditEventRecord{
+			ID:         id,
+			RunID:      storedRun,
+			Timestamp:  parsedTimestamp,
+			ActionType: strings.TrimSpace(actionType),
+			Payload:    payloadJSON(payload),
+		})
+	}
+	if err := eventRows.Err(); err != nil {
+		return RunDetail{}, false, err
+	}
+	return RunDetail{RunRecord: run, AuditEvents: events}, true, nil
+}
+
 func (store *SQLiteStore) initialize(ctx context.Context) error {
 	statements := []string{
 		`PRAGMA foreign_keys = ON`,
@@ -128,4 +222,59 @@ func (store *SQLiteStore) initialize(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanRunRecord(scanner rowScanner) (RunRecord, error) {
+	var (
+		run         RunRecord
+		status      string
+		startTime   string
+		endTime     sql.NullString
+		errorString sql.NullString
+	)
+	if err := scanner.Scan(&run.ID, &run.IssueID, &run.Repo, &status, &startTime, &endTime, &errorString); err != nil {
+		return RunRecord{}, err
+	}
+	parsedStartTime, err := parseStoredTime(startTime)
+	if err != nil {
+		return RunRecord{}, err
+	}
+	run.Status = Status(strings.TrimSpace(status))
+	run.StartTime = parsedStartTime
+	if endTime.Valid {
+		parsedEndTime, err := parseStoredTime(endTime.String)
+		if err != nil {
+			return RunRecord{}, err
+		}
+		run.EndTime = &parsedEndTime
+	}
+	if errorString.Valid {
+		trimmed := strings.TrimSpace(errorString.String)
+		run.ErrorMessage = &trimmed
+	}
+	return run, nil
+}
+
+func parseStoredTime(value string) (time.Time, error) {
+	return time.Parse(time.RFC3339Nano, strings.TrimSpace(value))
+}
+
+func payloadJSON(value string) json.RawMessage {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return json.RawMessage(`null`)
+	}
+	raw := []byte(trimmed)
+	if json.Valid(raw) {
+		return json.RawMessage(append([]byte(nil), raw...))
+	}
+	encoded, err := json.Marshal(trimmed)
+	if err != nil {
+		return json.RawMessage(`null`)
+	}
+	return json.RawMessage(encoded)
 }
