@@ -7,6 +7,7 @@ import (
 
 	"github.com/Inkbinder/autopilot/internal/copilot"
 	"github.com/Inkbinder/autopilot/internal/model"
+	"github.com/Inkbinder/autopilot/internal/runstate"
 	"github.com/Inkbinder/autopilot/internal/tracker"
 	"github.com/Inkbinder/autopilot/internal/workflow"
 	workspacepkg "github.com/Inkbinder/autopilot/internal/workspace"
@@ -33,6 +34,8 @@ type DependencyBuilder interface {
 
 type DefaultDependencyBuilder struct {
 	HTTPClient *http.Client
+	Logger     *slog.Logger
+	RunStore   runstate.Writer
 }
 
 func (builder DefaultDependencyBuilder) Build(config workflow.Config) (IssueTracker, WorkspaceManager, copilot.Client, error) {
@@ -40,7 +43,7 @@ func (builder DefaultDependencyBuilder) Build(config workflow.Config) (IssueTrac
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	workspaceProvider, err := workspacepkg.NewProvider(config.Workspace)
+	workspaceProvider, err := workspacepkg.NewProviderWithOptions(config.Workspace, workspacepkg.ProviderOptions{AuditWriter: builder.RunStore, Logger: builder.Logger})
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -48,7 +51,7 @@ func (builder DefaultDependencyBuilder) Build(config workflow.Config) (IssueTrac
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	copilotClient, err := copilot.NewClient(config)
+	copilotClient, err := copilot.NewClientWithOptions(config, copilot.ClientOptions{AuditWriter: builder.RunStore, Logger: builder.Logger})
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -59,4 +62,5 @@ type Options struct {
 	Logger       *slog.Logger
 	Builder      DependencyBuilder
 	PortOverride *int
+	RunStore     runstate.Writer
 }

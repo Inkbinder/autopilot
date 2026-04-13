@@ -9,6 +9,7 @@ require (
 )
 
 require (
+	github.com/mattn/go-sqlite3 v1.14.42 // indirect
 	github.com/osteele/tuesday v1.0.3 // indirect
 	golang.org/x/sys v0.13.0 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect

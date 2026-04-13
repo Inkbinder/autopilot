@@ -5,12 +5,14 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"syscall"
 
 	"github.com/Inkbinder/autopilot/internal/orchestrator"
+	"github.com/Inkbinder/autopilot/internal/runstate"
 	"github.com/Inkbinder/autopilot/internal/workflow"
 )
 
@@ -48,7 +50,13 @@ func run() error {
 		portValue := port
 		portOverride = &portValue
 	}
-	service, err := orchestrator.New(absWorkflowPath, orchestrator.Options{PortOverride: portOverride})
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	runStore, err := runstate.OpenSQLite(filepath.Join(filepath.Dir(absWorkflowPath), ".autopilot", "runs.db"))
+	if err != nil {
+		return err
+	}
+	defer runStore.Close()
+	service, err := orchestrator.New(absWorkflowPath, orchestrator.Options{Logger: logger, PortOverride: portOverride, RunStore: runStore})
 	if err != nil {
 		return err
 	}

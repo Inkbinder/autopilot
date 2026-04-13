@@ -13,6 +13,7 @@ import (
 
 	"github.com/Inkbinder/autopilot/internal/copilot"
 	"github.com/Inkbinder/autopilot/internal/model"
+	"github.com/Inkbinder/autopilot/internal/runstate"
 	"github.com/Inkbinder/autopilot/internal/workflow"
 )
 
@@ -20,9 +21,11 @@ const defaultFallbackPrompt = "You are working on an issue from GitHub."
 
 type Orchestrator struct {
 	workflowPath string
+	baseLogger   *slog.Logger
 	logger       *slog.Logger
 	builder      DependencyBuilder
 	portOverride *int
+	runStore     runstate.Writer
 
 	mu         sync.Mutex
 	definition workflow.Definition
@@ -53,6 +56,8 @@ type runtimeState struct {
 
 type runningEntry struct {
 	Issue            model.Issue
+	RunID            int64
+	Repo             string
 	WorkspacePath    string
 	StartedAt        time.Time
 	RetryAttempt     int
@@ -132,27 +137,34 @@ func New(workflowPath string, options Options) (*Orchestrator, error) {
 	if strings.TrimSpace(workflowPath) == "" {
 		return nil, fmt.Errorf("workflow path is required")
 	}
+	baseLogger := options.Logger
+	if baseLogger == nil {
+		baseLogger = slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	}
+	runStore := options.RunStore
+	if runStore == nil {
+		runStore = runstate.NopStore{}
+	}
 	builder := options.Builder
 	if builder == nil {
-		builder = DefaultDependencyBuilder{}
-	}
-	logger := options.Logger
-	if logger == nil {
-		logger = slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+		builder = DefaultDependencyBuilder{Logger: baseLogger, RunStore: runStore}
 	}
 	definition, config, err := workflow.LoadAndResolve(workflowPath, nil)
 	if err != nil {
 		return nil, err
 	}
+	logger := contextualLogger(baseLogger, config.Tracker.Repository, "")
 	trackerClient, workspaceManager, copilotClient, err := builder.Build(config)
 	if err != nil {
 		return nil, err
 	}
 	return &Orchestrator{
 		workflowPath: workflowPath,
+		baseLogger:   baseLogger,
 		logger:       logger,
 		builder:      builder,
 		portOverride: options.PortOverride,
+		runStore:     runStore,
 		definition:   definition,
 		config:       config,
 		tracker:      trackerClient,
@@ -246,13 +258,17 @@ func (orchestrator *Orchestrator) tick(ctx context.Context) {
 }
 
 func (orchestrator *Orchestrator) dispatchIfEligible(ctx context.Context, issue model.Issue, attempt *int) bool {
-	definition, config, trackerClient, workspaceManager, copilotClient, allowed := orchestrator.claimForDispatch(issue, attempt)
+	startedAt := time.Now().UTC()
+	definition, config, trackerClient, workspaceManager, copilotClient, allowed := orchestrator.claimForDispatch(issue, attempt, startedAt)
 	if !allowed {
 		return false
 	}
+	runID := orchestrator.createRunRecord(ctx, config.Tracker.Repository, issue, startedAt)
 	workerCtx, cancel := context.WithCancel(ctx)
+	workerCtx = runstate.WithMetadata(workerCtx, runstate.Metadata{RunID: runID, IssueID: issue.ID, Repo: config.Tracker.Repository})
 	orchestrator.mu.Lock()
 	entry := orchestrator.state.running[issue.ID]
+	entry.RunID = runID
 	entry.Cancel = cancel
 	orchestrator.mu.Unlock()
 
@@ -264,7 +280,7 @@ func (orchestrator *Orchestrator) dispatchIfEligible(ctx context.Context, issue 
 	return true
 }
 
-func (orchestrator *Orchestrator) claimForDispatch(issue model.Issue, attempt *int) (workflow.Definition, workflow.Config, IssueTracker, WorkspaceManager, copilot.Client, bool) {
+func (orchestrator *Orchestrator) claimForDispatch(issue model.Issue, attempt *int, startedAt time.Time) (workflow.Definition, workflow.Config, IssueTracker, WorkspaceManager, copilot.Client, bool) {
 	orchestrator.mu.Lock()
 	defer orchestrator.mu.Unlock()
 	if !orchestrator.isEligibleLocked(issue, attempt != nil) {
@@ -281,7 +297,8 @@ func (orchestrator *Orchestrator) claimForDispatch(issue model.Issue, attempt *i
 	}
 	orchestrator.state.running[issue.ID] = &runningEntry{
 		Issue:        issue,
-		StartedAt:    time.Now().UTC(),
+		Repo:         orchestrator.config.Tracker.Repository,
+		StartedAt:    startedAt,
 		RetryAttempt: retryAttempt,
 		RestartCount: retryAttempt,
 		Session: model.LiveSession{
@@ -340,6 +357,8 @@ func (orchestrator *Orchestrator) noAvailableSlots() bool {
 }
 
 func (orchestrator *Orchestrator) runWorker(ctx context.Context, definition workflow.Definition, config workflow.Config, trackerClient IssueTracker, workspaceManager WorkspaceManager, copilotClient copilot.Client, issue model.Issue, attempt *int) {
+	orchestrator.updateRunStatus(ctx, config.Tracker.Repository, issue, runstate.StatusRunning, nil)
+	hookCtx := backgroundRunContext(ctx)
 	workspace, err := workspaceManager.CreateForIssue(ctx, issue.Identifier)
 	if err != nil {
 		orchestrator.handleWorkerOutcome(issue.ID, workerOutcome{Issue: issue, Err: err})
@@ -350,13 +369,13 @@ func (orchestrator *Orchestrator) runWorker(ctx context.Context, definition work
 		if workspace.CreatedNow {
 			_ = os.RemoveAll(workspace.Path)
 		}
-		_ = workspaceManager.RunAfterRunHook(context.Background(), workspace.Path)
+		_ = workspaceManager.RunAfterRunHook(hookCtx, workspace.Path)
 		orchestrator.handleWorkerOutcome(issue.ID, workerOutcome{Issue: issue, Err: err})
 		return
 	}
 	defer func() {
-		if err := workspaceManager.RunAfterRunHook(context.Background(), workspace.Path); err != nil {
-			orchestrator.logger.Warn("after_run hook failed", slog.String("issue_id", issue.ID), slog.String("issue_identifier", issue.Identifier), slog.Any("error", err))
+		if err := workspaceManager.RunAfterRunHook(hookCtx, workspace.Path); err != nil {
+			orchestrator.issueLogger(config.Tracker.Repository, issue).Warn("after_run hook failed", slog.Any("error", err))
 		}
 	}()
 
@@ -441,6 +460,8 @@ func (orchestrator *Orchestrator) handleWorkerOutcome(issueID string, outcome wo
 	stopReason := entry.StopReason
 	cleanupWorkspace := entry.CleanupWorkspace
 	identifier := entry.Issue.Identifier
+	runID := entry.RunID
+	repo := entry.Repo
 	nextAttempt := 1
 	if entry.RetryAttempt > 0 {
 		nextAttempt = entry.RetryAttempt + 1
@@ -452,27 +473,40 @@ func (orchestrator *Orchestrator) handleWorkerOutcome(issueID string, outcome wo
 
 	switch stopReason {
 	case "terminal":
+		orchestrator.finishRunStatus(runID, repo, outcome.Issue, runstate.StatusSuccess, nil)
 		if cleanupWorkspace {
 			_ = orchestrator.workspace.RemoveForIssue(context.Background(), identifier)
 		}
 		orchestrator.releaseClaim(issueID)
 		return
 	case "inactive", "shutdown":
+		failure := stopReason == "shutdown"
+		if failure {
+			message := "service shutdown"
+			orchestrator.finishRunStatus(runID, repo, outcome.Issue, runstate.StatusFailed, &message)
+		} else {
+			orchestrator.finishRunStatus(runID, repo, outcome.Issue, runstate.StatusSuccess, nil)
+		}
 		orchestrator.releaseClaim(issueID)
 		return
 	case "stalled":
+		message := "stalled session"
+		orchestrator.finishRunStatus(runID, repo, outcome.Issue, runstate.StatusFailed, &message)
 		orchestrator.scheduleRetry(issueID, identifier, nextAttempt, false, "stalled session")
 		return
 	}
 
 	if outcome.Normal {
+		orchestrator.finishRunStatus(runID, repo, outcome.Issue, runstate.StatusSuccess, nil)
 		orchestrator.mu.Lock()
 		orchestrator.state.completed[issueID] = struct{}{}
 		orchestrator.mu.Unlock()
 		orchestrator.scheduleRetry(issueID, identifier, 1, true, "")
 		return
 	}
-	orchestrator.scheduleRetry(issueID, identifier, nextAttempt, false, errorString(outcome.Err))
+	message := errorString(outcome.Err)
+	orchestrator.finishRunStatus(runID, repo, outcome.Issue, runstate.StatusFailed, &message)
+	orchestrator.scheduleRetry(issueID, identifier, nextAttempt, false, message)
 }
 
 func (orchestrator *Orchestrator) releaseClaim(issueID string) {
@@ -621,7 +655,7 @@ func (orchestrator *Orchestrator) startupCleanup(ctx context.Context) {
 	}
 	for _, issue := range issues {
 		if err := workspaceManager.RemoveForIssue(ctx, issue.Identifier); err != nil {
-			orchestrator.logger.Warn("startup workspace cleanup failed", slog.String("issue_id", issue.ID), slog.String("issue_identifier", issue.Identifier), slog.Any("error", err))
+			orchestrator.issueLogger(config.Tracker.Repository, issue).Warn("startup workspace cleanup failed", slog.Any("error", err))
 		}
 	}
 }
@@ -647,6 +681,7 @@ func (orchestrator *Orchestrator) reloadWorkflow(logInvalid bool) {
 	orchestrator.tracker = trackerClient
 	orchestrator.workspace = workspaceManager
 	orchestrator.copilot = copilotClient
+	orchestrator.logger = contextualLogger(orchestrator.baseLogger, config.Tracker.Repository, "")
 	orchestrator.state.pollInterval = config.Polling.Interval
 	orchestrator.state.maxConcurrentAgents = config.Agent.MaxConcurrentAgents
 	orchestrator.mu.Unlock()
@@ -999,4 +1034,55 @@ func max(value int, other int) int {
 		return value
 	}
 	return other
+}
+
+func contextualLogger(base *slog.Logger, repo string, issueID string) *slog.Logger {
+	return base.With(slog.String("repo", strings.TrimSpace(repo)), slog.String("issue_id", strings.TrimSpace(issueID)))
+}
+
+func backgroundRunContext(ctx context.Context) context.Context {
+	background := context.Background()
+	metadata, ok := runstate.MetadataFromContext(ctx)
+	if !ok {
+		return background
+	}
+	return runstate.WithMetadata(background, metadata)
+}
+
+func (orchestrator *Orchestrator) issueLogger(repo string, issue model.Issue) *slog.Logger {
+	return contextualLogger(orchestrator.baseLogger, repo, issue.ID).With(slog.String("issue_identifier", issue.Identifier))
+}
+
+func (orchestrator *Orchestrator) createRunRecord(ctx context.Context, repo string, issue model.Issue, startedAt time.Time) int64 {
+	runID, err := orchestrator.runStore.CreateRun(ctx, runstate.CreateRunParams{IssueID: issue.ID, Repo: repo, Status: runstate.StatusQueued, StartTime: startedAt})
+	if err != nil {
+		orchestrator.issueLogger(repo, issue).Warn("run record create failed", slog.Any("error", err))
+		return 0
+	}
+	return runID
+}
+
+func (orchestrator *Orchestrator) updateRunStatus(ctx context.Context, repo string, issue model.Issue, status runstate.Status, errorMessage *string) {
+	metadata, ok := runstate.MetadataFromContext(ctx)
+	if !ok || metadata.RunID <= 0 {
+		return
+	}
+	params := runstate.UpdateRunParams{RunID: metadata.RunID, Status: status, ErrorMessage: errorMessage}
+	if status == runstate.StatusSuccess || status == runstate.StatusFailed {
+		finishedAt := time.Now().UTC()
+		params.EndTime = &finishedAt
+	}
+	if err := orchestrator.runStore.UpdateRun(ctx, params); err != nil {
+		orchestrator.issueLogger(repo, issue).Warn("run record update failed", slog.Any("error", err), slog.String("status", string(status)))
+	}
+}
+
+func (orchestrator *Orchestrator) finishRunStatus(runID int64, repo string, issue model.Issue, status runstate.Status, errorMessage *string) {
+	if runID <= 0 {
+		return
+	}
+	finishedAt := time.Now().UTC()
+	if err := orchestrator.runStore.UpdateRun(context.Background(), runstate.UpdateRunParams{RunID: runID, Status: status, EndTime: &finishedAt, ErrorMessage: errorMessage}); err != nil {
+		orchestrator.issueLogger(repo, issue).Warn("run record finalize failed", slog.Any("error", err), slog.String("status", string(status)))
+	}
 }

@@ -4,18 +4,25 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
 
+	"github.com/Inkbinder/autopilot/internal/runstate"
 	"github.com/Inkbinder/autopilot/internal/workflow"
 )
 
 var workspaceKeyPattern = regexp.MustCompile(`[^A-Za-z0-9._-]`)
 
 type WorkspaceConfig = workflow.WorkspaceConfig
+
+type ProviderOptions struct {
+	AuditWriter runstate.Writer
+	Logger      *slog.Logger
+}
 
 type WorkspaceProvider interface {
 	Setup(issueID string, config WorkspaceConfig) (workspacePath string, err error)
@@ -32,7 +39,9 @@ type workspacePathProvider interface {
 }
 
 type LocalProvider struct {
-	root string
+	root        string
+	auditWriter runstate.Writer
+	logger      *slog.Logger
 }
 
 var _ WorkspaceProvider = (*LocalProvider)(nil)
@@ -40,15 +49,23 @@ var _ contextAwareWorkspaceProvider = (*LocalProvider)(nil)
 var _ workspacePathProvider = (*LocalProvider)(nil)
 
 func NewProvider(config WorkspaceConfig) (WorkspaceProvider, error) {
+	return NewProviderWithOptions(config, ProviderOptions{})
+}
+
+func NewProviderWithOptions(config WorkspaceConfig, options ProviderOptions) (WorkspaceProvider, error) {
 	switch normalizeProviderName(config.Provider) {
 	case "local":
-		return NewLocalProvider(config)
+		return NewLocalProviderWithOptions(config, options)
 	default:
 		return nil, fmt.Errorf("unsupported workspace.provider: %s", config.Provider)
 	}
 }
 
 func NewLocalProvider(config WorkspaceConfig) (*LocalProvider, error) {
+	return NewLocalProviderWithOptions(config, ProviderOptions{})
+}
+
+func NewLocalProviderWithOptions(config WorkspaceConfig, options ProviderOptions) (*LocalProvider, error) {
 	root := strings.TrimSpace(config.Root)
 	if root == "" {
 		return nil, fmt.Errorf("workspace.root is required")
@@ -57,7 +74,7 @@ func NewLocalProvider(config WorkspaceConfig) (*LocalProvider, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &LocalProvider{root: absRoot}, nil
+	return &LocalProvider{root: absRoot, auditWriter: options.AuditWriter, logger: options.Logger}, nil
 }
 
 func (provider *LocalProvider) Setup(issueID string, _ WorkspaceConfig) (string, error) {
@@ -95,6 +112,16 @@ func (provider *LocalProvider) ExecuteContext(ctx context.Context, command strin
 	process := exec.CommandContext(ctx, command, args...)
 	process.Dir = dir
 	output, err := process.CombinedOutput()
+	if auditErr := runstate.RecordAuditEvent(ctx, provider.auditWriter, "workspace_exec", map[string]any{
+		"command": command,
+		"args":    args,
+		"dir":     dir,
+		"output":  string(output),
+		"success": err == nil,
+		"error":   errorString(err),
+	}); auditErr != nil {
+		provider.logAuditFailure(ctx, auditErr)
+	}
 	return string(output), err
 }
 
@@ -145,4 +172,19 @@ func validateWorkspacePath(root string, workspacePath string) error {
 		return fmt.Errorf("workspace path is outside root: %s", workspacePath)
 	}
 	return nil
+}
+
+func (provider *LocalProvider) logAuditFailure(ctx context.Context, err error) {
+	if provider.logger == nil {
+		return
+	}
+	metadata, _ := runstate.MetadataFromContext(ctx)
+	provider.logger.With(slog.String("repo", strings.TrimSpace(metadata.Repo)), slog.String("issue_id", strings.TrimSpace(metadata.IssueID))).Warn("workspace audit write failed", slog.Any("error", err))
+}
+
+func errorString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }

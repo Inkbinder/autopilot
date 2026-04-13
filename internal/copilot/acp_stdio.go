@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Inkbinder/autopilot/internal/runstate"
 	"github.com/Inkbinder/autopilot/internal/workflow"
 )
 
@@ -21,13 +23,19 @@ const maxACPLineBytes = 10 * 1024 * 1024
 
 type ACPStdioClient struct {
 	gracePeriod time.Duration
+	auditor     runstate.Writer
+	logger      *slog.Logger
 }
 
 func NewClient(config workflow.Config) (Client, error) {
+	return NewClientWithOptions(config, ClientOptions{})
+}
+
+func NewClientWithOptions(config workflow.Config, options ClientOptions) (Client, error) {
 	if config.Copilot.Transport != "acp_stdio" {
 		return nil, wrap(ErrUnsupportedTransport, fmt.Errorf("transport %s is not implemented in this build", config.Copilot.Transport))
 	}
-	return &ACPStdioClient{gracePeriod: 2 * time.Second}, nil
+	return &ACPStdioClient{gracePeriod: 2 * time.Second, auditor: options.AuditWriter, logger: options.Logger}, nil
 }
 
 func (client *ACPStdioClient) StartSession(ctx context.Context, request StartRequest) (Session, error) {
@@ -38,7 +46,7 @@ func (client *ACPStdioClient) StartSession(ctx context.Context, request StartReq
 	if !stat.IsDir() {
 		return nil, wrap(ErrInvalidWorkspaceCWD, fmt.Errorf("workspace is not a directory: %s", request.WorkspacePath))
 	}
-	process, err := startACPProcess(request.WorkspacePath, request.Copilot, request.OnEvent, client.gracePeriod)
+	process, err := startACPProcess(ctx, request.WorkspacePath, request.Copilot, request.OnEvent, client.gracePeriod, client.auditor, client.logger)
 	if err != nil {
 		return nil, err
 	}
@@ -70,6 +78,9 @@ type acpProcess struct {
 	onEvent     EventHandler
 	gracePeriod time.Duration
 	sessionID   string
+	auditor     runstate.Writer
+	logger      *slog.Logger
+	auditMeta   runstate.Metadata
 
 	mu        sync.Mutex
 	nextID    int
@@ -94,7 +105,14 @@ type acpError struct {
 	Message string `json:"message,omitempty"`
 }
 
-func startACPProcess(workspacePath string, config workflow.CopilotConfig, onEvent EventHandler, gracePeriod time.Duration) (*acpProcess, error) {
+type acpCallResult struct {
+	Result     map[string]any
+	RawRequest json.RawMessage
+	RawResult  json.RawMessage
+	RawError   json.RawMessage
+}
+
+func startACPProcess(ctx context.Context, workspacePath string, config workflow.CopilotConfig, onEvent EventHandler, gracePeriod time.Duration, auditor runstate.Writer, logger *slog.Logger) (*acpProcess, error) {
 	commandString := buildACPCommand(config)
 	command := exec.Command("bash", "-lc", commandString)
 	command.Dir = workspacePath
@@ -110,14 +128,27 @@ func startACPProcess(workspacePath string, config workflow.CopilotConfig, onEven
 	if err != nil {
 		return nil, wrap(ErrTransportError, err)
 	}
-	if err := command.Start(); err != nil {
+	err = command.Start()
+	if auditErr := runstate.RecordAuditEvent(ctx, auditor, "copilot_cli_start", map[string]any{
+		"command":        commandString,
+		"workspace_path": workspacePath,
+		"success":        err == nil,
+		"error":          errorString(err),
+	}); auditErr != nil {
+		logAuditFailure(logger, ctx, auditErr, "copilot audit write failed")
+	}
+	if err != nil {
 		return nil, wrap(ErrCopilotCLINotFound, err)
 	}
+	auditMeta, _ := runstate.MetadataFromContext(ctx)
 	process := &acpProcess{
 		command:     command,
 		stdin:       stdin,
 		onEvent:     onEvent,
 		gracePeriod: gracePeriod,
+		auditor:     auditor,
+		logger:      logger,
+		auditMeta:   auditMeta,
 		pending:     map[int]chan acpEnvelope{},
 		waitDone:    make(chan struct{}),
 		interrupt:   make(chan error, 4),
@@ -174,6 +205,14 @@ func (process *acpProcess) RunPrompt(ctx context.Context, prompt string, turn in
 			"text": prompt,
 		}},
 	})
+	process.recordAudit("llm_prompt", map[string]any{
+		"turn":           turn,
+		"prompt":         prompt,
+		"request":        rawJSON(result.RawRequest),
+		"response":       rawJSON(result.RawResult),
+		"response_error": rawJSON(result.RawError),
+		"error":          errorString(err),
+	})
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
 			process.emit(Event{Event: "prompt_timeout", Timestamp: time.Now().UTC(), SessionID: process.sessionID, CopilotCLIPID: process.pid, Turn: turn})
@@ -190,9 +229,9 @@ func (process *acpProcess) RunPrompt(ctx context.Context, prompt string, turn in
 		process.emit(Event{Event: "prompt_failed", Timestamp: time.Now().UTC(), SessionID: process.sessionID, CopilotCLIPID: process.pid, Message: err.Error(), Turn: turn})
 		return wrap(ErrPromptFailed, err)
 	}
-	message := summarizePayload(result)
-	usage := extractUsageFromNamedPayload("result", result)
-	rateLimits := extractRateLimits(result)
+	message := summarizePayload(result.Result)
+	usage := extractUsageFromNamedPayload("result", result.Result)
+	rateLimits := extractRateLimits(result.Result)
 	process.emit(Event{Event: "prompt_completed", Timestamp: time.Now().UTC(), SessionID: process.sessionID, CopilotCLIPID: process.pid, Message: message, Usage: usage, RateLimits: rateLimits, Turn: turn})
 	return nil
 }
@@ -230,9 +269,9 @@ func (process *acpProcess) newSession(ctx context.Context, workspacePath string,
 		}
 		return "", wrap(ErrACPHandshakeFailed, err)
 	}
-	sessionID := findString(result, "sessionId", "session_id", "id")
+	sessionID := findString(result.Result, "sessionId", "session_id", "id")
 	if sessionID == "" {
-		if nested := nestedMap(result, "session"); nested != nil {
+		if nested := nestedMap(result.Result, "session"); nested != nil {
 			sessionID = findString(nested, "sessionId", "session_id", "id")
 		}
 	}
@@ -242,43 +281,51 @@ func (process *acpProcess) newSession(ctx context.Context, workspacePath string,
 	return sessionID, nil
 }
 
-func (process *acpProcess) call(ctx context.Context, method string, params map[string]any) (map[string]any, error) {
+func (process *acpProcess) call(ctx context.Context, method string, params map[string]any) (acpCallResult, error) {
 	responseChannel := make(chan acpEnvelope, 1)
 	requestID := process.reserveID(responseChannel)
 	defer process.releaseID(requestID)
 
+	result := acpCallResult{}
 	payload := map[string]any{"id": requestID, "method": method, "params": params}
 	line, err := json.Marshal(payload)
 	if err != nil {
-		return nil, wrap(ErrTransportError, err)
+		return result, wrap(ErrTransportError, err)
 	}
+	result.RawRequest = append(result.RawRequest[:0], line...)
 	if _, err := process.stdin.Write(append(line, '\n')); err != nil {
-		return nil, wrap(ErrTransportError, err)
+		return result, wrap(ErrTransportError, err)
 	}
 
 	select {
 	case response := <-responseChannel:
 		if response.Error != nil {
-			return nil, fmt.Errorf("acp error code=%d message=%s", response.Error.Code, response.Error.Message)
+			rawError, marshalErr := json.Marshal(response.Error)
+			if marshalErr == nil {
+				result.RawError = rawError
+			}
+			return result, fmt.Errorf("acp error code=%d message=%s", response.Error.Code, response.Error.Message)
 		}
 		if len(response.Result) == 0 {
-			return map[string]any{}, nil
+			result.Result = map[string]any{}
+			return result, nil
 		}
-		result := map[string]any{}
-		if err := json.Unmarshal(response.Result, &result); err != nil {
-			return nil, wrap(ErrTransportError, err)
+		result.RawResult = append(result.RawResult[:0], response.Result...)
+		result.Result = map[string]any{}
+		if err := json.Unmarshal(response.Result, &result.Result); err != nil {
+			return result, wrap(ErrTransportError, err)
 		}
 		return result, nil
 	case err := <-process.interrupt:
-		return nil, err
+		return result, err
 	case <-process.waitDone:
 		err := process.exitErr()
 		if err == nil {
-			return nil, wrap(ErrTransportExit, fmt.Errorf("copilot process exited"))
+			return result, wrap(ErrTransportExit, fmt.Errorf("copilot process exited"))
 		}
-		return nil, wrap(ErrTransportExit, err)
+		return result, wrap(ErrTransportExit, err)
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return result, ctx.Err()
 	}
 }
 
@@ -329,6 +376,7 @@ func (process *acpProcess) readStderr(stderr io.Reader) {
 		if strings.TrimSpace(message) == "" {
 			continue
 		}
+		process.recordAudit("copilot_stderr", map[string]any{"message": message})
 		process.emit(Event{Event: "other_message", Timestamp: time.Now().UTC(), SessionID: process.sessionID, CopilotCLIPID: process.pid, Message: truncate(message, 512)})
 	}
 }
@@ -341,6 +389,18 @@ func (process *acpProcess) handleInboundEnvelope(envelope acpEnvelope, rawLine [
 	message := summarizePayload(params)
 	usage := extractUsage(method, params)
 	rateLimits := extractRateLimits(params)
+	actionType := "copilot_event"
+	switch {
+	case isInputRequired(method, params):
+		actionType = "copilot_input_required"
+	case isPermissionRequest(method, params):
+		actionType = "copilot_permission_request"
+	case strings.Contains(method, "update"):
+		actionType = "llm_response"
+	case strings.Contains(method, "tool"):
+		actionType = "mcp_tool_called"
+	}
+	process.recordAudit(actionType, map[string]any{"method": envelope.Method, "payload": rawJSON(rawLine)})
 
 	switch {
 	case isInputRequired(method, params):
@@ -448,6 +508,45 @@ func (process *acpProcess) exitErr() error {
 	process.mu.Lock()
 	defer process.mu.Unlock()
 	return process.waitErr
+}
+
+func (process *acpProcess) recordAudit(actionType string, payload any) {
+	if process.auditor == nil {
+		return
+	}
+	if err := runstate.RecordAuditEvent(process.auditContext(), process.auditor, actionType, payload); err != nil {
+		logAuditFailure(process.logger, process.auditContext(), err, "copilot audit write failed")
+	}
+}
+
+func (process *acpProcess) auditContext() context.Context {
+	ctx := context.Background()
+	if process.auditMeta.RunID <= 0 {
+		return ctx
+	}
+	return runstate.WithMetadata(ctx, process.auditMeta)
+}
+
+func logAuditFailure(logger *slog.Logger, ctx context.Context, err error, message string) {
+	if logger == nil {
+		return
+	}
+	metadata, _ := runstate.MetadataFromContext(ctx)
+	logger.With(slog.String("repo", strings.TrimSpace(metadata.Repo)), slog.String("issue_id", strings.TrimSpace(metadata.IssueID))).Warn(message, slog.Any("error", err))
+}
+
+func rawJSON(value []byte) any {
+	if len(value) == 0 {
+		return nil
+	}
+	return json.RawMessage(append([]byte(nil), value...))
+}
+
+func errorString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 func rawMap(payload json.RawMessage) map[string]any {

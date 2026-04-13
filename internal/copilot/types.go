@@ -2,8 +2,10 @@ package copilot
 
 import (
 	"context"
+	"log/slog"
 	"time"
 
+	"github.com/Inkbinder/autopilot/internal/runstate"
 	"github.com/Inkbinder/autopilot/internal/workflow"
 )
 
@@ -33,6 +35,11 @@ type StartRequest struct {
 	WorkspacePath string
 	Copilot       workflow.CopilotConfig
 	OnEvent       EventHandler
+}
+
+type ClientOptions struct {
+	AuditWriter runstate.Writer
+	Logger      *slog.Logger
 }
 
 type Client interface {
