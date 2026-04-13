@@ -1,7 +1,7 @@
 # autopilot
 Autopilot turns project work into isolated, autonomous implementation runs, allowing teams to manage work instead of watching coding agents.
 
-It is a long-running Go service that polls GitHub issues, creates per-issue workspaces, and runs GitHub Copilot sessions from a repo-owned `WORKFLOW.md`. The service loads the workflow on startup, watches it for changes while running, and can expose a local status dashboard and JSON API.
+It is a long-running Go service that polls GitHub issues, creates per-issue workspaces, and runs GitHub Copilot sessions from a repo-owned `WORKFLOW.md`. The service loads the workflow on startup, watches it for changes while running, persists run history and audit events beside the workflow file, and can expose a local status dashboard and JSON API.
 
 **Build**
 
@@ -37,6 +37,8 @@ gh auth refresh -h github.com -s delete_repo
 
 The smoke harness uses [smoke-test/fake-copilot.sh](smoke-test/fake-copilot.sh), so a real Copilot CLI is not required for that path.
 
+For a live walkthrough against a disposable GitHub repository instead of the fake Copilot smoke path, use [demo/run.sh](demo/run.sh) and follow [demo/README.md](demo/README.md) for its additional setup requirements.
+
 ```bash
 go build ./cmd/autopilot
 ```
@@ -62,7 +64,9 @@ For standard use, especially if you are starting from [example/WORKFLOW.md](exam
 - the GitHub Copilot CLI installed and authenticated as `copilot`, or an alternate command configured through `copilot.command`
 - a GitHub token supplied through `GITHUB_TOKEN` or `tracker.api_key`
 
-A good starting point is [example/WORKFLOW.md](example/WORKFLOW.md). Copy it to the repository root as `WORKFLOW.md`, replace `YOUR_ORG/YOUR_REPO`, and update the workspace root and `hooks.after_create` clone command for your environment. If you installed Autopilot with `go install`, clone or download [example/WORKFLOW.md](example/WORKFLOW.md) and the bundled skills under [example/.agents/skills](example/.agents/skills) separately before first run. The example workflow uses the default `acp_stdio` Copilot transport, dispatches issues with labels such as `autopilot:ready`, skips issues marked `autopilot:human-review`, `autopilot:blocked`, or `autopilot:question`, and follows GitHub issue dependencies automatically so issues with open blockers are not started until those blockers reach terminal states.
+A good starting point is [example/WORKFLOW.md](example/WORKFLOW.md). Copy it to the repository root as `WORKFLOW.md`, replace `YOUR_ORG/YOUR_REPO`, and update the workspace root and `hooks.after_create` clone command for your environment. If you installed Autopilot with `go install`, clone or download [example/WORKFLOW.md](example/WORKFLOW.md) and the bundled skills under [example/.agents/skills](example/.agents/skills) separately before first run. The example workflow uses the default `acp_stdio` Copilot transport, dispatches issues carrying the default lifecycle labels `autopilot:ready`, `autopilot:in-progress`, `autopilot:rework`, and `autopilot:merging`, excludes issues marked `autopilot:human-review`, `autopilot:blocked`, or `autopilot:question`, and follows GitHub issue dependencies automatically so issues with open blockers are not started until those blockers reach terminal states.
+
+If you want a guided end-to-end demo before wiring Autopilot to your own repository, [demo/run.sh](demo/run.sh) provisions a disposable GitHub repository, renders a workflow, seeds a dependency-linked issue queue, and prints a helper script that starts Autopilot against that repository. The full walkthrough is in [demo/README.md](demo/README.md).
 
 Run an installed binary with the default root workflow file:
 
@@ -106,18 +110,23 @@ From a repository checkout, the equivalent command is:
 go run ./cmd/autopilot -port 8080 ./WORKFLOW.md
 ```
 
+Autopilot writes structured JSON logs to stderr and stores run history in `.autopilot/runs.db` next to the resolved `WORKFLOW.md`. That local SQLite store backs the dashboard's recent-runs view and the per-run audit history endpoints.
+
 You can also set `server.port` in `WORKFLOW.md`. When a port is configured or overridden, Autopilot binds to `127.0.0.1` and exposes:
 
-- `/` for the local dashboard
+- `/` for the local dashboard and recent runs
+- `/runs/<run-id>` for an HTML view of a persisted run
 - `/api/v1/state` for a JSON snapshot
-- `/api/v1/refresh` to trigger an immediate poll and reconcile cycle
+- `POST /api/v1/refresh` to trigger an immediate poll and reconcile cycle
 - `/api/v1/<issue-identifier>` for per-issue status
+- `/api/v1/runs` for recent persisted runs
+- `/api/v1/runs/<run-id>` for run detail, including audit events
 
-If `workspace.root` is omitted, Autopilot uses a temporary workspace root under `/tmp/autopilot_workspaces`. The workflow file also controls polling interval, workspace hooks, concurrency, Copilot transport, and timeouts.
+If `workspace.root` is omitted, Autopilot uses a temporary workspace root under `/tmp/autopilot_workspaces`. `workspace.root` also supports `$VAR` and `~` expansion. The workflow file also controls polling interval, workspace hooks, global and per-state concurrency through `agent.max_concurrent_agents_by_state`, Copilot command and timeouts, and optional OTLP trace export over HTTP through `telemetry.otel_endpoint`. When set, `telemetry.otel_endpoint` should be an `http://` or `https://` OTLP/HTTP endpoint, not a gRPC endpoint. The example workflow uses `acp_stdio`, which is the transport implemented in this build.
 
 **Test**
 
-For local development, the fast validation path is `go test ./...`. For an end-to-end disposable integration check, use [smoke-test/run.sh](smoke-test/run.sh), which creates a temporary GitHub repository and issue, runs Autopilot against [smoke-test/WORKFLOW-SMOKE.md](smoke-test/WORKFLOW-SMOKE.md), then cleans up the remote repo and local files when the run succeeds.
+For local development, the fast validation path is `go test ./...`. For an end-to-end disposable integration check, use [smoke-test/run.sh](smoke-test/run.sh), which creates a temporary GitHub repository and issue, runs Autopilot against [smoke-test/WORKFLOW-SMOKE.md](smoke-test/WORKFLOW-SMOKE.md), validates dependency-aware dispatch, workspace lifecycle, ACP stdio plumbing, and the local status API, then cleans up the remote repo and local files when the run succeeds.
 
 Run the full test suite:
 
@@ -136,6 +145,8 @@ Run the disposable smoke test:
 ```bash
 smoke-test/run.sh
 ```
+
+If you need to inspect artifacts after a failure, use `smoke-test/run.sh --keep-local` to preserve the generated temp directory or `smoke-test/run.sh --keep-remote` to leave the disposable GitHub repository in place.
 
 **Contribute**
 
