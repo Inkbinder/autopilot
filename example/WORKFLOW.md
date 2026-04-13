@@ -32,6 +32,8 @@ copilot:
   prompt_timeout_ms: 3600000
   startup_timeout_ms: 5000
   stall_timeout_ms: 300000
+telemetry:
+   otel_endpoint: ""
 ---
 
 You are working on a GitHub issue `{{ issue.identifier }}`

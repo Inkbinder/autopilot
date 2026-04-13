@@ -11,6 +11,7 @@ import (
 	"github.com/Inkbinder/autopilot/internal/tracker"
 	"github.com/Inkbinder/autopilot/internal/workflow"
 	workspacepkg "github.com/Inkbinder/autopilot/internal/workspace"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type IssueTracker interface {
@@ -63,4 +64,5 @@ type Options struct {
 	Builder      DependencyBuilder
 	PortOverride *int
 	RunStore     runstate.Writer
+	Tracer       trace.Tracer
 }

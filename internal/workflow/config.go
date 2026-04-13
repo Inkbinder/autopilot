@@ -28,6 +28,7 @@ type Config struct {
 	Hooks        HooksConfig
 	Agent        AgentConfig
 	Copilot      CopilotConfig
+	Telemetry    TelemetryConfig
 	Server       ServerConfig
 }
 
@@ -79,6 +80,10 @@ type CopilotConfig struct {
 	StallTimeout   time.Duration
 }
 
+type TelemetryConfig struct {
+	OTLPEndpoint string
+}
+
 type ServerConfig struct {
 	Port *int
 }
@@ -106,6 +111,7 @@ func ResolveConfig(path string, definition Definition, lookupEnv func(string) st
 	hooksMap := nestedMap(definition.Config, "hooks")
 	agentMap := nestedMap(definition.Config, "agent")
 	copilotMap := nestedMap(definition.Config, "copilot")
+	telemetryMap := nestedMap(definition.Config, "telemetry")
 	serverMap := nestedMap(definition.Config, "server")
 
 	config := Config{
@@ -150,7 +156,8 @@ func ResolveConfig(path string, definition Definition, lookupEnv func(string) st
 			StartupTimeout: durationFromMillis(copilotMap["startup_timeout_ms"], 5*time.Second),
 			StallTimeout:   durationFromMillis(copilotMap["stall_timeout_ms"], 5*time.Minute),
 		},
-		Server: ServerConfig{Port: optionalInt(serverMap["port"])},
+		Telemetry: TelemetryConfig{OTLPEndpoint: trimOptionalString(stringValue(telemetryMap, "otel_endpoint"))},
+		Server:    ServerConfig{Port: optionalInt(serverMap["port"])},
 	}
 
 	if config.Tracker.Kind == "github" && config.Tracker.APIKey == "" {

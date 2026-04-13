@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/Inkbinder/autopilot/internal/orchestrator"
 	"github.com/Inkbinder/autopilot/internal/runstate"
@@ -51,6 +52,21 @@ func run() error {
 		portOverride = &portValue
 	}
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	_, config, err := workflow.LoadAndResolve(absWorkflowPath, nil)
+	if err != nil {
+		return err
+	}
+	telemetryShutdown, err := configureGlobalTelemetry(context.Background(), config)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := telemetryShutdown(shutdownCtx); err != nil {
+			logger.Warn("telemetry shutdown failed", slog.Any("error", err))
+		}
+	}()
 	runStore, err := runstate.OpenSQLite(filepath.Join(filepath.Dir(absWorkflowPath), ".autopilot", "runs.db"))
 	if err != nil {
 		return err

@@ -15,6 +15,10 @@ import (
 	"github.com/Inkbinder/autopilot/internal/model"
 	"github.com/Inkbinder/autopilot/internal/runstate"
 	"github.com/Inkbinder/autopilot/internal/workflow"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const defaultFallbackPrompt = "You are working on an issue from GitHub."
@@ -26,6 +30,7 @@ type Orchestrator struct {
 	builder      DependencyBuilder
 	portOverride *int
 	runStore     runstate.Writer
+	tracer       trace.Tracer
 
 	mu         sync.Mutex
 	definition workflow.Definition
@@ -150,6 +155,10 @@ func New(workflowPath string, options Options) (*Orchestrator, error) {
 	if builder == nil {
 		builder = DefaultDependencyBuilder{Logger: baseLogger, RunStore: runStore}
 	}
+	tracer := options.Tracer
+	if tracer == nil {
+		tracer = otel.Tracer("github.com/Inkbinder/autopilot/internal/orchestrator")
+	}
 	definition, config, err := workflow.LoadAndResolve(workflowPath, nil)
 	if err != nil {
 		return nil, err
@@ -166,6 +175,7 @@ func New(workflowPath string, options Options) (*Orchestrator, error) {
 		builder:      builder,
 		portOverride: options.PortOverride,
 		runStore:     runStore,
+		tracer:       tracer,
 		definition:   definition,
 		config:       config,
 		tracker:      trackerClient,
@@ -349,87 +359,107 @@ func (orchestrator *Orchestrator) noAvailableSlots() bool {
 
 func (orchestrator *Orchestrator) runWorker(ctx context.Context, definition workflow.Definition, config workflow.Config, trackerClient IssueTracker, workspaceManager WorkspaceManager, copilotClient copilot.Client, issue model.Issue, attempt *int) {
 	orchestrator.updateRunStatus(ctx, config.Tracker.Repository, issue, runstate.StatusRunning, nil)
-	hookCtx := backgroundRunContext(ctx)
-	workspace, err := workspaceManager.CreateForIssue(ctx, issue.Identifier)
-	if err != nil {
-		orchestrator.handleWorkerOutcome(issue.ID, workerOutcome{Issue: issue, Err: err})
-		return
-	}
-	orchestrator.updateWorkspacePath(issue.ID, workspace.Path)
-	if err := workspaceManager.PrepareForRun(ctx, workspace); err != nil {
-		if workspace.CreatedNow {
-			_ = os.RemoveAll(workspace.Path)
-		}
-		_ = workspaceManager.RunAfterRunHook(hookCtx, workspace.Path)
-		orchestrator.handleWorkerOutcome(issue.ID, workerOutcome{Issue: issue, Err: err})
-		return
-	}
-	defer func() {
-		if err := workspaceManager.RunAfterRunHook(hookCtx, workspace.Path); err != nil {
-			orchestrator.issueLogger(config.Tracker.Repository, issue).Warn("after_run hook failed", slog.Any("error", err))
-		}
-	}()
-
-	promptTemplate := definition.PromptTemplate
-	if strings.TrimSpace(promptTemplate) == "" {
-		promptTemplate = defaultFallbackPrompt
-	}
-	prompt, err := workflow.RenderPrompt(promptTemplate, issue, attempt)
-	if err != nil {
-		orchestrator.handleWorkerOutcome(issue.ID, workerOutcome{Issue: issue, Err: err})
-		return
-	}
-	session, err := copilotClient.StartSession(ctx, copilot.StartRequest{
-		WorkspacePath: workspace.Path,
-		Copilot:       config.Copilot,
-		OnEvent: func(event copilot.Event) {
-			orchestrator.handleAgentEvent(issue.ID, event)
-		},
+	phaseCtx := ctx
+	var workspace model.Workspace
+	phaseCtx, err := orchestrator.runPhase(phaseCtx, "WorkspaceSetup", nil, func(spanCtx context.Context) error {
+		var createErr error
+		workspace, createErr = workspaceManager.CreateForIssue(spanCtx, issue.Identifier)
+		return createErr
 	})
 	if err != nil {
 		orchestrator.handleWorkerOutcome(issue.ID, workerOutcome{Issue: issue, Err: err})
 		return
 	}
-	orchestrator.attachSession(issue.ID, session)
-	defer session.Close(context.Background())
+	orchestrator.updateWorkspacePath(issue.ID, workspace.Path)
+	phaseCtx, err = orchestrator.runPhase(phaseCtx, "PreFlightHooks", nil, func(spanCtx context.Context) error {
+		return workspaceManager.PrepareForRun(spanCtx, workspace)
+	})
+	if err != nil {
+		if workspace.CreatedNow {
+			_ = os.RemoveAll(workspace.Path)
+		}
+		_ = orchestrator.runPostFlightHooks(phaseCtx, workspace.Path, workspaceManager)
+		orchestrator.handleWorkerOutcome(issue.ID, workerOutcome{Issue: issue, Err: err})
+		return
+	}
+	defer func() {
+		if err := orchestrator.runPostFlightHooks(phaseCtx, workspace.Path, workspaceManager); err != nil {
+			orchestrator.issueLogger(config.Tracker.Repository, issue).Warn("after_run hook failed", slog.Any("error", err))
+		}
+	}()
 
 	currentIssue := issue
-	for turn := 1; turn <= config.Agent.MaxTurns; turn++ {
-		eventCursor := orchestrator.issueEventCursor(issue.ID)
-		turnPrompt := prompt
-		if turn > 1 {
-			turnPrompt = copilot.DefaultContinuationPrompt
+	phaseCtx, err = orchestrator.runPhase(phaseCtx, "CopilotExecution", []attribute.KeyValue{
+		attribute.String("issue_id", issue.ID),
+		attribute.String("model", config.Copilot.Model),
+	}, func(spanCtx context.Context) error {
+		promptTemplate := definition.PromptTemplate
+		if strings.TrimSpace(promptTemplate) == "" {
+			promptTemplate = defaultFallbackPrompt
 		}
-		promptCtx, cancel := context.WithTimeout(ctx, config.Copilot.PromptTimeout)
-		err := session.RunPrompt(promptCtx, turnPrompt, turn)
-		cancel()
-		if err != nil {
-			orchestrator.handleWorkerOutcome(issue.ID, workerOutcome{Issue: currentIssue, Err: err})
-			return
+		prompt, renderErr := workflow.RenderPrompt(promptTemplate, issue, attempt)
+		if renderErr != nil {
+			return renderErr
 		}
-		if message, ok := orchestrator.turnRateLimitMessage(issue.ID, eventCursor); ok {
-			orchestrator.handleWorkerOutcome(issue.ID, workerOutcome{Issue: currentIssue, Err: fmt.Errorf("copilot rate limited: %s", message)})
-			return
+		session, startErr := copilotClient.StartSession(spanCtx, copilot.StartRequest{
+			WorkspacePath: workspace.Path,
+			Copilot:       config.Copilot,
+			OnEvent: func(event copilot.Event) {
+				orchestrator.handleAgentEvent(issue.ID, event)
+			},
+		})
+		if startErr != nil {
+			return startErr
 		}
-		refreshed, err := trackerClient.FetchIssueStatesByIDs(ctx, []string{issue.ID})
-		if err != nil {
-			orchestrator.handleWorkerOutcome(issue.ID, workerOutcome{Issue: currentIssue, Err: err})
-			return
+		orchestrator.attachSession(issue.ID, session)
+		defer session.Close(context.Background())
+
+		currentIssue = issue
+		for turn := 1; turn <= config.Agent.MaxTurns; turn++ {
+			eventCursor := orchestrator.issueEventCursor(issue.ID)
+			turnPrompt := prompt
+			if turn > 1 {
+				turnPrompt = copilot.DefaultContinuationPrompt
+			}
+			promptCtx, cancel := context.WithTimeout(spanCtx, config.Copilot.PromptTimeout)
+			runErr := session.RunPrompt(promptCtx, turnPrompt, turn)
+			cancel()
+			if runErr != nil {
+				return runErr
+			}
+			if message, ok := orchestrator.turnRateLimitMessage(issue.ID, eventCursor); ok {
+				return fmt.Errorf("copilot rate limited: %s", message)
+			}
+			refreshed, fetchErr := trackerClient.FetchIssueStatesByIDs(spanCtx, []string{issue.ID})
+			if fetchErr != nil {
+				return fetchErr
+			}
+			if len(refreshed) > 0 {
+				currentIssue = refreshed[0]
+				orchestrator.updateIssue(issue.ID, currentIssue)
+			}
+			if containsNormalized(config.Tracker.ActiveStates, currentIssue.State) && !orchestrator.turnProducedProgress(issue.ID, eventCursor) {
+				orchestrator.markRunningIssue(issue.ID, "stalled", false)
+				return fmt.Errorf("no agent activity during turn %d", turn)
+			}
+			if !containsNormalized(config.Tracker.ActiveStates, currentIssue.State) {
+				break
+			}
 		}
-		if len(refreshed) > 0 {
-			currentIssue = refreshed[0]
-			orchestrator.updateIssue(issue.ID, currentIssue)
-		}
-		if containsNormalized(config.Tracker.ActiveStates, currentIssue.State) && !orchestrator.turnProducedProgress(issue.ID, eventCursor) {
-			orchestrator.markRunningIssue(issue.ID, "stalled", false)
-			orchestrator.handleWorkerOutcome(issue.ID, workerOutcome{Issue: currentIssue, Err: fmt.Errorf("no agent activity during turn %d", turn)})
-			return
-		}
-		if !containsNormalized(config.Tracker.ActiveStates, currentIssue.State) {
-			break
-		}
+		return nil
+	})
+	if err != nil {
+		orchestrator.handleWorkerOutcome(issue.ID, workerOutcome{Issue: currentIssue, Err: err})
+		return
 	}
 	orchestrator.handleWorkerOutcome(issue.ID, workerOutcome{Issue: currentIssue, Normal: true})
+}
+
+func (orchestrator *Orchestrator) runPostFlightHooks(ctx context.Context, workspacePath string, workspaceManager WorkspaceManager) error {
+	_, err := orchestrator.runPhase(backgroundRunContext(ctx), "PostFlightHooks", nil, func(spanCtx context.Context) error {
+		return workspaceManager.RunAfterRunHook(spanCtx, workspacePath)
+	})
+	return err
 }
 
 type workerOutcome struct {
@@ -836,6 +866,17 @@ func (orchestrator *Orchestrator) handleAgentEvent(issueID string, event copilot
 	}
 }
 
+func (orchestrator *Orchestrator) runPhase(ctx context.Context, name string, attributes []attribute.KeyValue, run func(context.Context) error) (context.Context, error) {
+	phaseCtx, span := orchestrator.tracer.Start(ctx, name, trace.WithAttributes(attributes...))
+	defer span.End()
+	if err := run(phaseCtx); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return phaseCtx, err
+	}
+	return phaseCtx, nil
+}
+
 func (orchestrator *Orchestrator) Snapshot() Snapshot {
 	orchestrator.mu.Lock()
 	defer orchestrator.mu.Unlock()
@@ -1033,12 +1074,10 @@ func contextualLogger(base *slog.Logger, repo string, issueID string) *slog.Logg
 }
 
 func backgroundRunContext(ctx context.Context) context.Context {
-	background := context.Background()
-	metadata, ok := runstate.MetadataFromContext(ctx)
-	if !ok {
-		return background
+	if ctx == nil {
+		return context.Background()
 	}
-	return runstate.WithMetadata(background, metadata)
+	return context.WithoutCancel(ctx)
 }
 
 func (orchestrator *Orchestrator) issueLogger(repo string, issue model.Issue) *slog.Logger {

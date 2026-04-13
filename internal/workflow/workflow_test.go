@@ -130,6 +130,27 @@ func TestResolveConfigParsesWorkspaceProviderSettings(t *testing.T) {
 	}
 }
 
+func TestResolveConfigParsesTelemetrySettings(t *testing.T) {
+	t.Parallel()
+	definition := Definition{Config: map[string]any{
+		"tracker": map[string]any{
+			"kind":       "github",
+			"repository": "octo/widgets",
+			"api_key":    "token",
+		},
+		"telemetry": map[string]any{
+			"otel_endpoint": "https://collector.example.com/v1/traces",
+		},
+	}}
+	config, err := ResolveConfig("/tmp/WORKFLOW.md", definition, nil)
+	if err != nil {
+		t.Fatalf("ResolveConfig() error = %v", err)
+	}
+	if config.Telemetry.OTLPEndpoint != "https://collector.example.com/v1/traces" {
+		t.Fatalf("otel endpoint = %q, want https://collector.example.com/v1/traces", config.Telemetry.OTLPEndpoint)
+	}
+}
+
 func TestRenderPromptUsesLiquidAndFailsOnUnknownVariables(t *testing.T) {
 	t.Parallel()
 	attempt := 2

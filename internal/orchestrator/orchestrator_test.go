@@ -17,6 +17,8 @@ import (
 	"github.com/Inkbinder/autopilot/internal/model"
 	"github.com/Inkbinder/autopilot/internal/runstate"
 	"github.com/Inkbinder/autopilot/internal/workflow"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 type fakeBuilder struct {
@@ -324,6 +326,50 @@ func TestRunWorkerStopsOnRateLimitNotification(t *testing.T) {
 	_ = orchestrator.shutdown(context.Background())
 }
 
+func TestRunWorkerEmitsTracingPhases(t *testing.T) {
+	t.Parallel()
+	workflowPath := writeWorkflowFile(t)
+	issue := model.Issue{ID: "1", Identifier: "octo/widgets#1", Title: "Task", State: "Open", Labels: []string{"autopilot:ready"}}
+	tracker := &fakeTracker{candidates: []model.Issue{issue}, statesByID: map[string]model.Issue{"1": {ID: "1", Identifier: issue.Identifier, Title: issue.Title, State: "Closed"}}}
+	workspace := &fakeWorkspace{root: filepath.Join(t.TempDir(), "workspaces")}
+	client := &fakeCopilot{}
+	spanRecorder := tracetest.NewSpanRecorder()
+	tracerProvider := sdktrace.NewTracerProvider()
+	tracerProvider.RegisterSpanProcessor(spanRecorder)
+	t.Cleanup(func() {
+		_ = tracerProvider.Shutdown(context.Background())
+	})
+
+	orchestrator, err := New(workflowPath, Options{Builder: fakeBuilder{tracker: tracker, workspace: workspace, copilot: client}, Tracer: tracerProvider.Tracer("test")})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	orchestrator.tick(context.Background())
+	orchestrator.wg.Wait()
+
+	spans := spanRecorder.Ended()
+	if !spanNamesInOrder(spans, []string{"WorkspaceSetup", "PreFlightHooks", "CopilotExecution", "PostFlightHooks"}) {
+		t.Fatalf("ended spans = %v, want execution phases in order", spanNames(spans))
+	}
+	var copilotSpan sdktrace.ReadOnlySpan
+	for _, span := range spans {
+		if span.Name() == "CopilotExecution" {
+			copilotSpan = span
+			break
+		}
+	}
+	if copilotSpan == nil {
+		t.Fatal("CopilotExecution span missing")
+	}
+	if got := spanAttributeValue(copilotSpan, "issue_id"); got != issue.ID {
+		t.Fatalf("CopilotExecution issue_id = %q, want %q", got, issue.ID)
+	}
+	if got := spanAttributeValue(copilotSpan, "model"); got != "gpt-5.4" {
+		t.Fatalf("CopilotExecution model = %q, want gpt-5.4", got)
+	}
+	_ = orchestrator.shutdown(context.Background())
+}
+
 func TestHTTPHandlersServeStateRefreshAndIssueDetail(t *testing.T) {
 	t.Parallel()
 	workflowPath := writeWorkflowFile(t)
@@ -593,23 +639,23 @@ func writeWorkflowFile(t *testing.T) string {
 func writeWorkflowFileWithMaxTurns(t *testing.T, maxTurns int) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "WORKFLOW.md")
-	content := `---
-tracker:
-  kind: github
-  repository: octo/widgets
-  api_key: token
-polling:
-  interval_ms: 25
-agent:
-  max_turns: ` + strconv.Itoa(maxTurns) + `
-copilot:
-  command: fake
-  transport: acp_stdio
-  prompt_timeout_ms: 1000
-  startup_timeout_ms: 1000
----
-Implement {{ issue.identifier }}
-`
+	content := "---\n" +
+		"tracker:\n" +
+		"  kind: github\n" +
+		"  repository: octo/widgets\n" +
+		"  api_key: token\n" +
+		"polling:\n" +
+		"  interval_ms: 25\n" +
+		"agent:\n" +
+		"  max_turns: " + strconv.Itoa(maxTurns) + "\n" +
+		"copilot:\n" +
+		"  command: fake\n" +
+		"  transport: acp_stdio\n" +
+		"  model: gpt-5.4\n" +
+		"  prompt_timeout_ms: 1000\n" +
+		"  startup_timeout_ms: 1000\n" +
+		"---\n" +
+		"Implement {{ issue.identifier }}\n"
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
@@ -618,4 +664,34 @@ Implement {{ issue.identifier }}
 
 func stringPtr(value string) *string {
 	return &value
+}
+
+func spanNamesInOrder(spans []sdktrace.ReadOnlySpan, want []string) bool {
+	index := 0
+	for _, span := range spans {
+		if index >= len(want) {
+			return true
+		}
+		if span.Name() == want[index] {
+			index++
+		}
+	}
+	return index == len(want)
+}
+
+func spanNames(spans []sdktrace.ReadOnlySpan) []string {
+	names := make([]string, 0, len(spans))
+	for _, span := range spans {
+		names = append(names, span.Name())
+	}
+	return names
+}
+
+func spanAttributeValue(span sdktrace.ReadOnlySpan, key string) string {
+	for _, attribute := range span.Attributes() {
+		if string(attribute.Key) == key {
+			return attribute.Value.AsString()
+		}
+	}
+	return ""
 }
