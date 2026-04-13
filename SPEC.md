@@ -6,9 +6,9 @@ Purpose: Define a service that orchestrates coding agents to get project work do
 
 This draft assumes a reference implementation target of a single Go service on Linux, using
 GitHub APIs directly (GraphQL-first reads and REST for narrow operational writes, with no `gh`
-dependency), the local GitHub Copilot CLI over ACP stdio, local filesystem workspaces,
-in-memory orchestrator state, `WORKFLOW.md` with strict Liquid-style prompt rendering,
-structured JSON logging, and a built-in HTTP status API.
+dependency), the local GitHub Copilot CLI over ACP stdio, host-local workspaces with optional
+docker-backed execution, in-memory orchestrator state, `WORKFLOW.md` with strict Liquid-style
+prompt rendering, structured JSON logging, and a built-in HTTP status API.
 
 ## 1. Problem Statement
 
@@ -123,7 +123,7 @@ Autopilot is easiest to port when kept in these layers:
    - Polling loop, issue eligibility, concurrency, retries, reconciliation.
 
 4. `Execution Layer` (workspace + agent subprocess)
-  - Filesystem lifecycle, workspace preparation, Copilot CLI ACP/headless transport.
+  - Workspace-provider lifecycle, workspace preparation, Copilot CLI ACP stdio transport.
 
 5. `Integration Layer` (GitHub adapter)
    - API calls and normalization for tracker data.
@@ -135,10 +135,11 @@ Autopilot is easiest to port when kept in these layers:
 
 - GitHub APIs for issue tracking and operational integration (`tracker.kind: github` in this
   specification version), using direct API access rather than a local `gh` dependency.
-- Local filesystem for workspaces and logs.
+- Host-local filesystem for workspaces and logs.
+- Docker daemon access and image pull/read availability when `workspace.provider: docker` is used.
 - Optional workspace population tooling (for example Git CLI, if used).
-- GitHub Copilot CLI executable that supports ACP server mode and/or headless mode, with ACP
-  stdio as the reference transport.
+- GitHub Copilot CLI executable that supports ACP server mode, with ACP stdio as the transport
+  implemented in the current build.
 - Host environment authentication for the issue tracker and coding agent.
 
 ## 4. Core Domain Model
@@ -190,21 +191,24 @@ Typed runtime values derived from `WorkflowDefinition.config` plus environment r
 Examples:
 
 - poll interval
-- workspace root
+- workspace provider, root, and optional docker image
 - active and terminal issue states
 - dispatch and excluded label filters
 - concurrency limits
 - coding-agent executable/args/timeouts
 - workspace hooks
+- optional telemetry endpoint and status server port
 
 #### 4.1.4 Workspace
 
-Filesystem workspace assigned to one issue identifier.
+Host filesystem workspace assigned to one issue identifier. The selected workspace provider may
+map this host path to a provider-specific execution directory (for example `/workspace` inside a
+docker container).
 
 Fields (logical):
 
-- `path` (workspace path; current runtime typically uses absolute paths, but relative roots are
-  possible if configured without path separators)
+- `path` (host workspace path; current runtime typically uses absolute paths, but relative roots
+  are possible if configured without path separators)
 - `workspace_key` (sanitized issue identifier)
 - `created_now` (boolean, used to gate `after_create` hook)
 
@@ -334,17 +338,17 @@ Top-level keys:
 - `hooks`
 - `agent`
 - `copilot`
+- `telemetry`
+- `server`
 
 Unknown keys should be ignored for forward compatibility.
 
 Note:
 
-- The workflow front matter is extensible. Optional extensions may define additional top-level keys
-  (for example `server`) without changing the core schema above.
-- Extensions should document their field schema, defaults, validation rules, and whether changes
-  apply dynamically or require restart.
-- Common extension: `server.port` (integer) enables the optional HTTP server described in Section
-  13.7.
+- The current Go implementation includes built-in `telemetry.otel_endpoint` and `server.port`
+  fields in addition to the core dispatch/runtime settings above.
+- The workflow front matter remains extensible; additional documented top-level keys may still be
+  added without changing the base file format.
 
 #### 5.3.1 `tracker` (object)
 
@@ -389,11 +393,20 @@ Fields:
 
 Fields:
 
+- `provider` (string)
+  - Default: `local`
+  - Current runtime values: `local`, `docker`
+  - `local` runs hooks and the Copilot CLI directly against the host workspace path.
+  - `docker` keeps the host workspace path under `workspace.root` but runs hooks and the Copilot
+    CLI inside a long-lived per-issue container with that host path bind-mounted at `/workspace`.
 - `root` (path string or `$VAR`)
   - Default: `<system-temp>/autopilot_workspaces`
   - `~` and strings containing path separators are expanded.
   - Bare strings without path separators are preserved as-is (relative roots are allowed but
     discouraged).
+- `image` (string, optional)
+  - Required when `provider == docker`.
+  - Used as the image for the per-issue workspace container.
 
 #### 5.3.4 `hooks` (object)
 
@@ -440,26 +453,22 @@ Fields:
 
 - `command` (string shell command)
   - Default: `copilot`
-  - The runtime launches this command in the workspace directory.
+  - The runtime launches this command in the provider-resolved execution directory.
   - The launched process must support the configured transport.
 - `transport` (string)
   - Default: `acp_stdio`
-  - Supported values:
-    - `acp_stdio` -> launch `copilot --acp --stdio`
-    - `acp_tcp` -> launch `copilot --acp --port <port>`
-    - `headless_http` -> launch `copilot --headless --port <port>`
+  - Workflow validation accepts `acp_stdio`, `acp_tcp`, and `headless_http`.
+  - The current Go runtime implements only `acp_stdio`; selecting `acp_tcp` or `headless_http`
+    will fail during dependency/client construction.
 - `cli_args` (list of strings, optional)
-  - Extra arguments appended after transport-specific arguments.
+  - Extra arguments appended after `--acp --stdio` in the current build.
   - Example uses include permission flags, logging, or custom agent selection.
 - `model` (string, optional)
-  - If set, the runtime should request this model for new Copilot sessions when the chosen
-    transport supports it.
+  - If set, the current ACP stdio client requests this model during `session/new`.
 - `port` (integer, optional)
-  - Used when `transport` is `acp_tcp` or `headless_http`.
-  - `0` may be used to request an ephemeral local port if supported by the implementation.
+  - Parsed from workflow config but unused in the current build.
 - `github_mcp_tools` (list of strings, optional)
-  - Default: empty list.
-  - Additional GitHub MCP tools or toolsets to enable for the local Copilot CLI session.
+  - Parsed from workflow config but not wired into ACP session startup in the current build.
 - `prompt_timeout_ms` (integer)
   - Default: `3600000` (1 hour)
 - `startup_timeout_ms` (integer)
@@ -586,11 +595,9 @@ This section is intentionally redundant so a coding agent can implement the conf
 - `tracker.dispatch_labels`: list of strings, default `["autopilot:ready", "autopilot:merging", "autopilot:in-progress", "autopilot:rework"]`; any matching label makes an open issue eligible for dispatch
 - `tracker.excluded_labels`: list of strings, default `["autopilot:human-review", "autopilot:blocked", "autopilot:question"]`; any matching label makes an issue ineligible for dispatch
 - `polling.interval_ms`: integer, default `30000`
+- `workspace.provider`: string, default `local`; current runtime values `local` and `docker`
 - `workspace.root`: path, default `<system-temp>/autopilot_workspaces`
-- `worker.ssh_hosts` (extension): list of SSH host strings, optional; when omitted, work runs
-  locally
-- `worker.max_concurrent_agents_per_host` (extension): positive integer, optional; shared per-host
-  cap applied across configured SSH hosts
+- `workspace.image`: string, required when `workspace.provider = docker`
 - `hooks.after_create`: shell script or null
 - `hooks.before_run`: shell script or null
 - `hooks.after_run`: shell script or null
@@ -601,14 +608,15 @@ This section is intentionally redundant so a coding agent can implement the conf
 - `agent.max_retry_backoff_ms`: integer, default `300000` (5m)
 - `agent.max_concurrent_agents_by_state`: map of positive integers, default `{}`
 - `copilot.command`: shell command string, default `copilot`
-- `copilot.transport`: string, default `acp_stdio`; supported `acp_stdio`, `acp_tcp`, `headless_http`
+- `copilot.transport`: string, default `acp_stdio`; config validation accepts `acp_stdio`, `acp_tcp`, `headless_http`, but the current runtime implements only `acp_stdio`
 - `copilot.cli_args`: list of strings, default `[]`
 - `copilot.model`: string, optional
-- `copilot.port`: integer, optional; `0` may request an ephemeral local port
-- `copilot.github_mcp_tools`: list of strings, default `[]`
+- `copilot.port`: integer, optional; parsed but unused in the current build
+- `copilot.github_mcp_tools`: list of strings, default `[]`; parsed but unused in the current build
 - `copilot.prompt_timeout_ms`: integer, default `3600000`
 - `copilot.startup_timeout_ms`: integer, default `5000`
 - `copilot.stall_timeout_ms`: integer, default `300000`
+- `telemetry.otel_endpoint`: string, optional OTLP/HTTP endpoint
 - `server.port` (extension): integer, optional; enables the optional HTTP server, `0` may be used
   for ephemeral local bind, and CLI `--port` overrides it
 
@@ -765,12 +773,6 @@ Per-state limit:
 
 The runtime counts issues by their current tracked state in the `running` map.
 
-Optional SSH host limit:
-
-- When `worker.max_concurrent_agents_per_host` is set, each configured SSH host may run at most
-  that many concurrent agents at once.
-- Hosts at that cap are skipped for new dispatch until capacity frees up.
-
 ### 8.4 Retry and Backoff
 
 Retry entry creation:
@@ -836,6 +838,11 @@ This prevents stale terminal workspaces from accumulating after restarts.
 
 ### 9.1 Workspace Layout
 
+Workspace provider:
+
+- `workspace.provider` selects the execution backend.
+- Current runtime values: `local` and `docker`.
+
 Workspace root:
 
 - `workspace.root` (normalized path; the current config layer expands path-like values and preserves
@@ -843,7 +850,12 @@ Workspace root:
 
 Per-issue workspace path:
 
-- `<workspace.root>/<sanitized_issue_identifier>`
+- `<workspace.root>/<sanitized_issue_identifier>` on the host filesystem
+
+Provider-resolved execution directory:
+
+- `local` provider -> same as the host workspace path
+- `docker` provider -> `/workspace` inside the running per-issue container
 
 Workspace persistence:
 
@@ -866,6 +878,8 @@ Algorithm summary:
 Notes:
 
 - This section does not assume any specific repository/VCS workflow.
+- When `workspace.provider == docker`, provisioning also creates or recreates a long-lived
+  per-issue container that bind-mounts the host workspace path at `/workspace`.
 - Workspace preparation beyond directory creation (for example dependency bootstrap, checkout/sync,
   code generation) is implementation-defined and is typically handled via hooks.
 
@@ -895,10 +909,12 @@ Supported hooks:
 
 Execution contract:
 
-- Execute in a local shell context appropriate to the host OS, with the workspace directory as
+- Execute via the selected workspace provider, with the provider-resolved execution directory as
   `cwd`.
-- On POSIX systems, `sh -lc <script>` (or a stricter equivalent such as `bash -lc <script>`) is a
-  conforming default.
+- `local` provider -> shell on the host OS using the host workspace path.
+- `docker` provider -> shell inside the per-issue container using the bind-mounted workspace path.
+- On POSIX systems, `sh -lc <script>` is the current implementation path after provider
+  resolution.
 - Hook timeout uses `hooks.timeout_ms`; default: `60000 ms`.
 - Log hook start, failures, and timeouts.
 
@@ -913,10 +929,11 @@ Failure semantics:
 
 This is the most important portability constraint.
 
-Invariant 1: Run the coding agent only in the per-issue workspace path.
+Invariant 1: Run the coding agent only in the per-issue workspace context.
 
 - Before launching the coding-agent subprocess, validate:
-  - `cwd == workspace_path`
+  - the host `workspace_path` stays under `workspace_root`
+  - the subprocess `cwd` is the provider-resolved execution directory for that workspace
 
 Invariant 2: Workspace path must stay inside workspace root.
 
@@ -939,7 +956,7 @@ Compatibility profile:
 - The normative contract is message ordering, required behaviors, and the logical fields that must
   be extracted (for example session IDs, completion state, approval handling, and usage/rate-limit
   telemetry).
-- Exact message shapes may vary slightly across compatible Copilot CLI and ACP/headless versions.
+- Exact message shapes may vary slightly across compatible Copilot CLI and ACP stdio versions.
 - Implementations should tolerate equivalent payload shapes when they carry the same logical
   meaning, especially for nested IDs, approval requests, user-input-required signals, and
   token/rate-limit metadata.
@@ -949,23 +966,17 @@ Compatibility profile:
 Subprocess launch parameters:
 
 - Command: `copilot.command`
-- Invocation depends on `copilot.transport`:
-  - `acp_stdio` -> `copilot --acp --stdio`
-  - `acp_tcp` -> `copilot --acp --port <port>`
-  - `headless_http` -> `copilot --headless --port <port>`
-- Working directory: workspace path
+- Invocation in the current build: `copilot --acp --stdio`
+- Working directory: provider-resolved execution directory (`workspace.path` for `local`, `/workspace` for `docker`)
 - Stdout/stderr: separate streams
-- Framing:
-  - `acp_stdio` -> line-delimited ACP messages on stdout/stderr-separated stdio
-  - `acp_tcp` -> ACP over a local TCP port
-  - `headless_http` -> local HTTP service exposed by the CLI
+- Framing: line-delimited ACP messages on stdout with stderr kept as a separate stream
 
 Notes:
 
 - The default command is `copilot`.
 - Extra CLI flags may be appended using `copilot.cli_args`.
-- For `acp_tcp` and `headless_http`, the implementation must determine the effective listener URL
-  from the configured or assigned port before creating a session.
+- The config layer still validates `acp_tcp` and `headless_http` transport identifiers for forward
+  compatibility, but the current build does not implement them.
 
 Recommended additional process settings:
 
@@ -973,30 +984,23 @@ Recommended additional process settings:
 
 ### 10.2 Session Startup Handshake
 
-The local Copilot CLI integration supports two startup shapes.
+The current Go implementation supports one startup shape.
 
-ACP transports (`acp_stdio` or `acp_tcp`):
+ACP stdio transport:
 
 1. Start the CLI using the configured transport.
 2. Perform the ACP `initialize` handshake.
-3. Create a session with `cwd = <workspace_path>` and optional session config such as `model`.
+3. Create a session with `cwd = <provider-resolved-execution-dir>` and optional session config such as `model`.
 4. Submit the rendered prompt to that session.
 
 Illustrative ACP transcript (equivalent payload shapes are acceptable if they preserve the same
 semantics):
 
 ```json
-{"id":1,"method":"initialize","params":{"protocolVersion":"<acp-version>","clientCapabilities":{}}}
-{"id":2,"method":"newSession","params":{"cwd":"/abs/workspace","model":"<optional-model>","mcpServers":{}}}
-{"id":3,"method":"prompt","params":{"sessionId":"<session-id>","prompt":[{"type":"text","text":"<rendered prompt-or-continuation-guidance>"}]}}
+{"id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}}
+{"id":2,"method":"session/new","params":{"cwd":"/abs/workspace-or-/workspace","model":"<optional-model>","mcpServers":[]}}
+{"id":3,"method":"session/prompt","params":{"sessionId":"<session-id>","prompt":[{"type":"text","text":"<rendered prompt-or-continuation-guidance>"}]}}
 ```
-
-Headless transport (`headless_http`):
-
-1. Start `copilot --headless --port <port>`.
-2. Connect to the local listener using the supported local API surface (commonly the Copilot SDK).
-3. Create or resume a session with `cwd = <workspace_path>` and optional `model`.
-4. Submit the rendered prompt and wait for completion or stream updates.
 
 Session identifiers:
 
@@ -1076,18 +1080,17 @@ Example high-trust behavior:
 
 - Start the Copilot CLI with permissive flags such as `--allow-all` when appropriate for the
   deployment.
-- Enable the required GitHub MCP tools or toolsets up front for the session.
 - Treat user-input-required turns as hard failure.
 
 MCP server behavior:
 
-- Local Copilot CLI includes GitHub MCP integration and may be configured with additional MCP
-  servers.
-- The implementation may enable additional GitHub MCP tools or toolsets via
-  `copilot.github_mcp_tools` or `copilot.cli_args`.
-- Additional MCP servers may be local/stdio or remote/HTTP as supported by the local Copilot CLI.
-- Unsupported MCP tools or permission-denied tool requests must surface an operator-visible failure
-  and must not leave the session stuck indefinitely.
+- The current ACP stdio client sends `session/new` with an empty `mcpServers` list.
+- Workflow config still parses `copilot.github_mcp_tools`, but the current build does not translate
+  it into session startup parameters.
+- Tool-related ACP notifications are surfaced as operator-visible events and audit records.
+- Permission requests are auto-approved by selecting an available allow-style option when present.
+- Tool failures must surface as prompt failures or operator-visible Copilot events and must not
+  leave the worker stuck indefinitely.
 
 Hard failure on user input requirement:
 
@@ -1475,15 +1478,6 @@ Minimum endpoints:
         }
       },
       "retry": null,
-      "logs": {
-        "copilot_session_logs": [
-          {
-            "label": "latest",
-            "path": "/var/log/autopilot/copilot/octo-org_widgets_649/latest.log",
-            "url": null
-          }
-        ]
-      },
       "recent_events": [
         {
           "at": "2026-02-24T20:14:59Z",
@@ -1820,7 +1814,7 @@ function run_agent_attempt(issue, attempt, orchestrator_channel):
   if run_hook("before_run", workspace.path) failed:
     fail_worker("before_run hook error")
 
-  session = copilot_client.start_session(workspace=workspace.path)
+  session = copilot_client.start_session(workspace=provider_resolved_execution_dir(workspace.path))
   if session failed:
     run_hook_best_effort("after_run", workspace.path)
     fail_worker("agent session startup error")
@@ -1971,7 +1965,8 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - `after_run` hook runs after each attempt and failure/timeouts are logged and ignored
 - `before_remove` hook runs on cleanup and failures/timeouts are ignored
 - Workspace path sanitization and root containment invariants are enforced before agent launch
-- Agent launch uses the per-issue workspace path as cwd and rejects out-of-root paths
+- Agent launch uses the provider-resolved workspace execution directory as cwd and rejects
+  out-of-root host paths
 
 ### 17.3 Issue Tracker Client
 
@@ -2012,33 +2007,26 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 
 ### 17.5 Local Copilot CLI Transport Client
 
-- Launch command uses workspace cwd and invokes `bash -lc <copilot.command>`.
+- Launch command uses the provider-resolved workspace cwd and invokes `bash -lc <copilot.command>`.
 - ACP stdio transport performs the documented ACP initialization sequence and opens a session before
   sending the first prompt.
-- ACP TCP transport connects to the configured local port and performs the same initialization and
-  session creation sequence.
-- Headless HTTP transport establishes a session against the local Copilot listener before sending
-  prompts.
-- Policy-related startup/session payloads use the implementation's documented approval, sandbox,
-  and MCP settings.
+- The current build does not implement ACP TCP or headless HTTP session startup.
+- Session startup sends an empty `mcpServers` list and includes `model` only when configured.
 - Session creation responses are parsed and stored as `session_id` for observability/state.
-- Request/response read timeout is enforced where the selected transport requires it.
+- Startup timeout is enforced.
 - Prompt timeout is enforced.
-- Partial protocol frames are buffered safely until a complete message is available.
+- ACP stdio lines are buffered safely up to the implementation's configured scanner limit.
 - Stdout and stderr are handled separately for stdio transports; protocol frames are parsed only
   from the configured transport channel.
 - Non-protocol stderr lines are logged but do not crash parsing.
-- Permission and tool-call events are handled according to the implementation's documented policy.
-- Unsupported MCP tool calls are rejected without stalling the session.
-- User input requests are handled according to the implementation's documented policy and do not
-  stall indefinitely.
+- Permission requests are auto-approved when the ACP payload exposes an allow-style option.
+- Tool-call notifications are surfaced as events and audit entries.
+- User input requests fail the current prompt instead of waiting indefinitely.
 - Usage and rate-limit payloads are extracted from transport event payloads.
-- Compatible ACP/headless payload variants for permissions, user-input-required signals, and
+- Compatible ACP payload variants for permissions, user-input-required signals, and
   usage/rate-limit telemetry are accepted when they preserve the same logical meaning.
-- If optional MCP servers are implemented, session startup exposes the supported tool specs needed
-  for discovery by the selected transport.
-- If `copilot.github_mcp_tools` is enabled, GitHub MCP tools are available to the session and
-  transport/tool failures are surfaced as structured errors.
+- Workflow config may still contain reserved MCP-related fields, but the current build does not
+  expose configurable extra MCP servers through `WORKFLOW.md`.
 
 ### 17.6 Observability
 
@@ -2065,8 +2053,8 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 These checks are recommended for production readiness and may be skipped in CI when credentials,
 network access, or external service permissions are unavailable.
 
-- A real tracker smoke test can be run with valid credentials supplied by `GITHUB_TOKEN` or a
-  documented local bootstrap mechanism (for example `~/.github_token`).
+- A real tracker smoke test can be run with valid credentials supplied by `GITHUB_TOKEN` or an
+  equivalent token source wired through `tracker.api_key`.
 - Real integration tests should use isolated test identifiers/workspaces and clean up tracker
   artifacts when practical.
 - A skipped real-integration test should be reported as skipped, not silently treated as passed.
@@ -2092,7 +2080,7 @@ Use the same validation profiles as Section 17:
 - Workspace manager with sanitized per-issue workspaces
 - Workspace lifecycle hooks (`after_create`, `before_run`, `after_run`, `before_remove`)
 - Hook timeout config (`hooks.timeout_ms`, default `60000`)
-- Local Copilot CLI transport client (ACP stdio, ACP TCP, or headless HTTP)
+- Local Copilot CLI transport client (ACP stdio in the current build)
 - Copilot launch command config (`copilot.command`, default `copilot`)
 - Strict prompt rendering with `issue` and `attempt` variables
 - Exponential retry queue with continuation retries after normal exit
@@ -2106,8 +2094,8 @@ Use the same validation profiles as Section 17:
 
 - Optional HTTP server honors CLI `--port` over `server.port`, uses a safe default bind host, and
   exposes the baseline endpoints/error semantics in Section 13.7 if shipped.
-- Optional GitHub MCP tool exposure is wired into the Copilot session using the configured
-  Autopilot auth and transport model.
+- TODO: Wire optional GitHub MCP tool exposure into Copilot session startup when MCP server
+  configuration becomes part of the runtime contract.
 - TODO: Persist retry queue and session metadata across process restarts.
 - TODO: Make observability settings configurable in workflow front matter without prescribing UI
   implementation details.
@@ -2122,58 +2110,12 @@ Use the same validation profiles as Section 17:
 - If the optional HTTP server is shipped, verify the configured port behavior and loopback/default
   bind expectations on the target environment.
 
-## Appendix A. SSH Worker Extension (Optional)
+## Appendix A. SSH Worker Extension (Not Implemented in Current Build)
 
-This appendix describes a common extension profile in which Autopilot keeps one central
-orchestrator but executes worker runs on one or more remote hosts over SSH.
+The current Go codebase does not implement remote SSH workers.
 
-### A.1 Execution Model
-
-- The orchestrator remains the single source of truth for polling, claims, retries, and
-  reconciliation.
-- `worker.ssh_hosts` provides the candidate SSH destinations for remote execution.
-- Each worker run is assigned to one host at a time, and that host becomes part of the run's
-  effective execution identity along with the issue workspace.
-- `workspace.root` is interpreted on the remote host, not on the orchestrator host.
-- The local Copilot CLI transport is launched against the remote host instead of as a purely local
-  subprocess, so the orchestrator still owns the session lifecycle even though commands execute
-  remotely.
-- Continuation turns inside one worker lifetime should stay on the same host and workspace.
-- A remote host should satisfy the same basic contract as a local worker environment: reachable
-  shell, writable workspace root, Copilot CLI executable, and any required auth or repository
-  prerequisites.
-
-### A.2 Scheduling Notes
-
-- SSH hosts may be treated as a pool for dispatch.
-- Implementations may prefer the previously used host on retries when that host is still
-  available.
-- `worker.max_concurrent_agents_per_host` is an optional shared per-host cap across configured SSH
-  hosts.
-- When all SSH hosts are at capacity, dispatch should wait rather than silently falling back to a
-  different execution mode.
-- Implementations may fail over to another host when the original host is unavailable before work
-  has meaningfully started.
-- Once a run has already produced side effects, a transparent rerun on another host should be
-  treated as a new attempt, not as invisible failover.
-
-### A.3 Problems to Consider
-
-- Remote environment drift:
-  - Each host needs the expected shell environment, Copilot CLI executable, auth, and repository
-    prerequisites.
-- Workspace locality:
-  - Workspaces are usually host-local, so moving an issue to a different host is typically a cold
-    restart unless shared storage exists.
-- Path and command safety:
-  - Remote path resolution, shell quoting, and workspace-boundary checks matter more once execution
-    crosses a machine boundary.
-- Startup and failover semantics:
-  - Implementations should distinguish host-connectivity/startup failures from in-workspace agent
-    failures so the same ticket is not accidentally re-executed on multiple hosts.
-- Host health and saturation:
-  - A dead or overloaded host should reduce available capacity, not cause duplicate execution or an
-    accidental fallback to local work.
-- Cleanup and observability:
-  - Operators need to know which host owns a run, where its workspace lives, and whether cleanup
-    happened on the right machine.
+- All worker execution paths run through the configured local workspace provider (`local` or
+  `docker`).
+- Treat `worker.*` SSH settings from older drafts as unsupported in this build.
+- If SSH-backed workers are reintroduced later, they should be documented as a new implementation
+  profile rather than assumed by the current behavior contract.

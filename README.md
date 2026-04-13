@@ -55,7 +55,8 @@ go build -o ./bin/autopilot ./cmd/autopilot
 For standard use, especially if you are starting from [example/WORKFLOW.md](example/WORKFLOW.md) and the bundled skills under [example/.agents/skills](example/.agents/skills), make sure the Autopilot host has:
 
 - a valid `WORKFLOW.md` file
-- a writable workspace root, either set in `workspace.root` or available through the default `/tmp/autopilot_workspaces`
+- a writable host workspace root, either set in `workspace.root` or available through the default `/tmp/autopilot_workspaces`
+- if `workspace.provider` is `docker`, access to a local Docker daemon plus a pullable or preloaded image referenced by `workspace.image`
 - a GitHub repository configured in `tracker.repository` using `owner/repo` format
 - network access to the GitHub API for the configured repository
 - `git`, because the example workflow clones the target repository and the bundled pull, commit, and push skills assume normal git operations inside the workspace
@@ -64,7 +65,7 @@ For standard use, especially if you are starting from [example/WORKFLOW.md](exam
 - the GitHub Copilot CLI installed and authenticated as `copilot`, or an alternate command configured through `copilot.command`
 - a GitHub token supplied through `GITHUB_TOKEN` or `tracker.api_key`
 
-A good starting point is [example/WORKFLOW.md](example/WORKFLOW.md). Copy it to the repository root as `WORKFLOW.md`, replace `YOUR_ORG/YOUR_REPO`, and update the workspace root and `hooks.after_create` clone command for your environment. If you installed Autopilot with `go install`, clone or download [example/WORKFLOW.md](example/WORKFLOW.md) and the bundled skills under [example/.agents/skills](example/.agents/skills) separately before first run. The example workflow uses the default `acp_stdio` Copilot transport, dispatches issues carrying the default lifecycle labels `autopilot:ready`, `autopilot:in-progress`, `autopilot:rework`, and `autopilot:merging`, excludes issues marked `autopilot:human-review`, `autopilot:blocked`, or `autopilot:question`, and follows GitHub issue dependencies automatically so issues with open blockers are not started until those blockers reach terminal states.
+A good starting point is [example/WORKFLOW.md](example/WORKFLOW.md). Copy it to the repository root as `WORKFLOW.md`, replace `YOUR_ORG/YOUR_REPO`, and update the workspace settings and `hooks.after_create` clone command for your environment. If you switch that workflow to `workspace.provider: docker`, also set `workspace.image`; hooks and Copilot sessions then run inside that container, so the image needs the same tools and auth setup your workflow expects. If you installed Autopilot with `go install`, clone or download [example/WORKFLOW.md](example/WORKFLOW.md) and the bundled skills under [example/.agents/skills](example/.agents/skills) separately before first run. The example workflow uses the default `acp_stdio` Copilot transport, dispatches issues carrying the default lifecycle labels `autopilot:ready`, `autopilot:in-progress`, `autopilot:rework`, and `autopilot:merging`, excludes issues marked `autopilot:human-review`, `autopilot:blocked`, or `autopilot:question`, and follows GitHub issue dependencies automatically so issues with open blockers are not started until those blockers reach terminal states.
 
 If you want a guided end-to-end demo before wiring Autopilot to your own repository, [demo/run.sh](demo/run.sh) provisions a disposable GitHub repository, renders a workflow, seeds a dependency-linked issue queue, and prints a helper script that starts Autopilot against that repository. The full walkthrough is in [demo/README.md](demo/README.md).
 
@@ -122,7 +123,7 @@ You can also set `server.port` in `WORKFLOW.md`. When a port is configured or ov
 - `/api/v1/runs` for recent persisted runs
 - `/api/v1/runs/<run-id>` for run detail, including audit events
 
-If `workspace.root` is omitted, Autopilot uses a temporary workspace root under `/tmp/autopilot_workspaces`. `workspace.root` also supports `$VAR` and `~` expansion. The workflow file also controls polling interval, workspace hooks, global and per-state concurrency through `agent.max_concurrent_agents_by_state`, Copilot command and timeouts, and optional OTLP trace export over HTTP through `telemetry.otel_endpoint`. When set, `telemetry.otel_endpoint` should be an `http://` or `https://` OTLP/HTTP endpoint, not a gRPC endpoint. The example workflow uses `acp_stdio`, which is the transport implemented in this build.
+If `workspace.root` is omitted, Autopilot uses a temporary workspace root under `/tmp/autopilot_workspaces`. `workspace.root` also supports `$VAR` and `~` expansion. If `workspace.provider` is omitted, Autopilot uses the local provider. Set `workspace.provider: docker` to keep the host workspace under `workspace.root` while running hooks and Copilot sessions inside a long-lived per-issue container; when you do, `workspace.image` is required. The workflow file also controls polling interval, workspace hooks, global and per-state concurrency through `agent.max_concurrent_agents_by_state`, Copilot command, `copilot.cli_args`, optional `copilot.model`, and timeouts, plus optional OTLP trace export over HTTP through `telemetry.otel_endpoint`. When set, `telemetry.otel_endpoint` should be an `http://` or `https://` OTLP/HTTP endpoint, not a gRPC endpoint. The config validator accepts `acp_stdio`, `acp_tcp`, and `headless_http` transport names, but this build only implements `acp_stdio`; choosing another transport will fail during startup.
 
 **Test**
 

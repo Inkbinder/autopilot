@@ -20,6 +20,8 @@ polling:
   interval_ms: 5000
 workspace:
   root: ~/code/autopilot-workspaces
+   # provider: docker
+   # image: ghcr.io/YOUR_ORG/autopilot-worker:latest
 hooks:
   after_create: |
     git clone --depth 1 https://github.com/YOUR_ORG/YOUR_REPO .
