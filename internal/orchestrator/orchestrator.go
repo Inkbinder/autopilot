@@ -397,6 +397,10 @@ func (orchestrator *Orchestrator) runWorker(ctx context.Context, definition work
 			orchestrator.handleWorkerOutcome(issue.ID, workerOutcome{Issue: currentIssue, Err: err})
 			return
 		}
+		if message, ok := orchestrator.turnRateLimitMessage(issue.ID, eventCursor); ok {
+			orchestrator.handleWorkerOutcome(issue.ID, workerOutcome{Issue: currentIssue, Err: fmt.Errorf("copilot rate limited: %s", message)})
+			return
+		}
 		refreshed, err := trackerClient.FetchIssueStatesByIDs(ctx, []string{issue.ID})
 		if err != nil {
 			orchestrator.handleWorkerOutcome(issue.ID, workerOutcome{Issue: currentIssue, Err: err})
@@ -726,6 +730,9 @@ func (orchestrator *Orchestrator) turnProducedProgress(issueID string, eventCurs
 		eventCursor = len(entry.RecentEvents)
 	}
 	for _, event := range entry.RecentEvents[eventCursor:] {
+		if isRateLimitEvent(event) {
+			continue
+		}
 		switch event.Event {
 		case "prompt_completed", "session_started":
 			continue
@@ -734,6 +741,32 @@ func (orchestrator *Orchestrator) turnProducedProgress(issueID string, eventCurs
 		}
 	}
 	return false
+}
+
+func (orchestrator *Orchestrator) turnRateLimitMessage(issueID string, eventCursor int) (string, bool) {
+	orchestrator.mu.Lock()
+	defer orchestrator.mu.Unlock()
+	entry, ok := orchestrator.state.running[issueID]
+	if !ok {
+		return "", false
+	}
+	if eventCursor < 0 || eventCursor > len(entry.RecentEvents) {
+		eventCursor = len(entry.RecentEvents)
+	}
+	for _, event := range entry.RecentEvents[eventCursor:] {
+		if isRateLimitEvent(event) {
+			return event.Message, true
+		}
+	}
+	return "", false
+}
+
+func isRateLimitEvent(event IssueEvent) bool {
+	if strings.TrimSpace(event.Message) == "" {
+		return false
+	}
+	message := strings.ToLower(event.Message)
+	return strings.Contains(message, "hit a rate limit") || strings.Contains(message, "please try again in")
 }
 
 func (orchestrator *Orchestrator) handleAgentEvent(issueID string, event copilot.Event) {

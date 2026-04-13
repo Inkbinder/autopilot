@@ -84,9 +84,10 @@ func (workspace *fakeWorkspace) Root() string                       { return wor
 func (workspace *fakeWorkspace) ValidateWorkspacePath(string) error { return nil }
 
 type fakeCopilot struct {
-	prompts []string
-	onEvent copilot.EventHandler
-	silent  bool
+	prompts     []string
+	onEvent     copilot.EventHandler
+	silent      bool
+	rateLimited bool
 }
 
 func (client *fakeCopilot) StartSession(_ context.Context, request copilot.StartRequest) (copilot.Session, error) {
@@ -107,6 +108,9 @@ func (session *fakeSession) ProcessID() *int   { return nil }
 func (session *fakeSession) RunPrompt(_ context.Context, prompt string, turn int) error {
 	session.client.prompts = append(session.client.prompts, prompt)
 	if session.client.onEvent != nil {
+		if session.client.rateLimited {
+			session.client.onEvent(copilot.Event{Event: "notification", Timestamp: time.Now().UTC(), SessionID: "fake-session", Turn: turn, Message: `{"sessionId":"fake-session","update":{"content":{"text":"Error: Sorry, you've hit a rate limit that restricts the number of Copilot model requests you can make within a specific time period. Please try again in 4 hours.","type":"text"},"sessionUpdate":"agent_message_chunk"}}`})
+		}
 		if !session.client.silent {
 			session.client.onEvent(copilot.Event{Event: "notification", Timestamp: time.Now().UTC(), SessionID: "fake-session", Turn: turn, Message: "working"})
 		}
@@ -246,6 +250,39 @@ func TestRunWorkerStopsSilentTurnLoop(t *testing.T) {
 	if retry.entry.Error != "stalled session" {
 		orchestrator.mu.Unlock()
 		t.Fatalf("retry error = %q, want stalled session", retry.entry.Error)
+	}
+	orchestrator.mu.Unlock()
+	_ = orchestrator.shutdown(context.Background())
+}
+
+func TestRunWorkerStopsOnRateLimitNotification(t *testing.T) {
+	t.Parallel()
+	workflowPath := writeWorkflowFileWithMaxTurns(t, 3)
+	issue := model.Issue{ID: "1", Identifier: "octo/widgets#1", Title: "Task", State: "Open", Labels: []string{"autopilot:merging"}}
+	fakeTracker := &fakeTracker{candidates: []model.Issue{issue}, statesByID: map[string]model.Issue{"1": issue}}
+	fakeWorkspace := &fakeWorkspace{root: filepath.Join(t.TempDir(), "workspaces")}
+	fakeCopilot := &fakeCopilot{rateLimited: true}
+	orchestrator, err := New(workflowPath, Options{Builder: fakeBuilder{tracker: fakeTracker, workspace: fakeWorkspace, copilot: fakeCopilot}})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	orchestrator.tick(context.Background())
+	orchestrator.wg.Wait()
+
+	orchestrator.mu.Lock()
+	if len(fakeCopilot.prompts) != 1 {
+		orchestrator.mu.Unlock()
+		t.Fatalf("prompts = %d, want 1", len(fakeCopilot.prompts))
+	}
+	retry, ok := orchestrator.state.retryAttempts[issue.ID]
+	if !ok {
+		orchestrator.mu.Unlock()
+		t.Fatalf("retry entry missing after rate limit event")
+	}
+	if !strings.Contains(retry.entry.Error, "hit a rate limit") {
+		orchestrator.mu.Unlock()
+		t.Fatalf("retry error = %q, want rate limit message", retry.entry.Error)
 	}
 	orchestrator.mu.Unlock()
 	_ = orchestrator.shutdown(context.Background())
