@@ -1,14 +1,11 @@
 package workspace
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
@@ -16,25 +13,17 @@ import (
 	"github.com/Inkbinder/autopilot/internal/workflow"
 )
 
-var workspaceKeyPattern = regexp.MustCompile(`[^A-Za-z0-9._-]`)
-
-type ScriptRunner interface {
-	Run(ctx context.Context, workingDir string, script string) (ScriptResult, error)
-}
-
-type ScriptResult struct {
-	Stdout string
-	Stderr string
-}
-
 type Manager struct {
-	root   string
-	hooks  workflow.HooksConfig
-	runner ScriptRunner
+	root            string
+	workspaceConfig WorkspaceConfig
+	hooks           workflow.HooksConfig
+	provider        WorkspaceProvider
 }
 
-func NewManager(config workflow.Config, runner ScriptRunner) (*Manager, error) {
-	root := config.Workspace.Root
+func NewManager(config workflow.Config, provider WorkspaceProvider) (*Manager, error) {
+	workspaceConfig := config.Workspace
+	workspaceConfig.Provider = normalizeProviderName(workspaceConfig.Provider)
+	root := workspaceConfig.Root
 	if strings.TrimSpace(root) == "" {
 		return nil, fmt.Errorf("workspace.root is required")
 	}
@@ -42,10 +31,14 @@ func NewManager(config workflow.Config, runner ScriptRunner) (*Manager, error) {
 	if err != nil {
 		return nil, err
 	}
-	if runner == nil {
-		runner = execScriptRunner{}
+	workspaceConfig.Root = absRoot
+	if provider == nil {
+		provider, err = NewProvider(workspaceConfig)
+		if err != nil {
+			return nil, err
+		}
 	}
-	return &Manager{root: absRoot, hooks: config.Hooks, runner: runner}, nil
+	return &Manager{root: absRoot, workspaceConfig: workspaceConfig, hooks: config.Hooks, provider: provider}, nil
 }
 
 func (manager *Manager) Root() string {
@@ -53,33 +46,40 @@ func (manager *Manager) Root() string {
 }
 
 func (manager *Manager) CreateForIssue(ctx context.Context, issueIdentifier string) (model.Workspace, error) {
-	if err := os.MkdirAll(manager.root, 0o755); err != nil {
+	workspacePath, pathKnown := manager.workspacePath(issueIdentifier)
+	createdNow := false
+	if pathKnown {
+		if err := manager.ValidateWorkspacePath(workspacePath); err != nil {
+			return model.Workspace{}, err
+		}
+		var err error
+		createdNow, err = manager.workspaceNeedsCreation(workspacePath)
+		if err != nil {
+			return model.Workspace{}, err
+		}
+	}
+
+	workspace := model.Workspace{WorkspaceKey: SanitizeWorkspaceKey(issueIdentifier)}
+	path, err := manager.provider.Setup(issueIdentifier, manager.workspaceConfig)
+	if err != nil {
 		return model.Workspace{}, err
 	}
-	workspace := model.Workspace{
-		WorkspaceKey: SanitizeWorkspaceKey(issueIdentifier),
-	}
-	workspace.Path = filepath.Join(manager.root, workspace.WorkspaceKey)
+	workspace.Path = path
 	if err := manager.ValidateWorkspacePath(workspace.Path); err != nil {
 		return model.Workspace{}, err
 	}
 	stat, err := os.Stat(workspace.Path)
-	if err == nil {
-		if !stat.IsDir() {
-			return model.Workspace{}, fmt.Errorf("workspace path exists and is not a directory: %s", workspace.Path)
-		}
-		return workspace, nil
-	}
-	if !errors.Is(err, os.ErrNotExist) {
+	if err != nil {
 		return model.Workspace{}, err
 	}
-	if err := os.MkdirAll(workspace.Path, 0o755); err != nil {
-		return model.Workspace{}, err
+	if !stat.IsDir() {
+		return model.Workspace{}, fmt.Errorf("workspace path exists and is not a directory: %s", workspace.Path)
 	}
-	workspace.CreatedNow = true
-	if manager.hooks.AfterCreate != "" {
+
+	workspace.CreatedNow = createdNow
+	if workspace.CreatedNow && manager.hooks.AfterCreate != "" {
 		if _, err := manager.runHook(ctx, "after_create", workspace.Path, manager.hooks.AfterCreate); err != nil {
-			_ = os.RemoveAll(workspace.Path)
+			_ = manager.provider.Teardown(issueIdentifier)
 			return model.Workspace{}, err
 		}
 	}
@@ -112,7 +112,7 @@ func (manager *Manager) RunAfterRunHook(ctx context.Context, workspacePath strin
 }
 
 func (manager *Manager) RemoveForIssue(ctx context.Context, issueIdentifier string) error {
-	workspacePath := filepath.Join(manager.root, SanitizeWorkspaceKey(issueIdentifier))
+	workspacePath, _ := manager.workspacePath(issueIdentifier)
 	if err := manager.ValidateWorkspacePath(workspacePath); err != nil {
 		return err
 	}
@@ -129,22 +129,11 @@ func (manager *Manager) RemoveForIssue(ctx context.Context, issueIdentifier stri
 	if manager.hooks.BeforeRemove != "" {
 		_, _ = manager.runHook(ctx, "before_remove", workspacePath, manager.hooks.BeforeRemove)
 	}
-	return os.RemoveAll(workspacePath)
+	return manager.provider.Teardown(issueIdentifier)
 }
 
 func (manager *Manager) ValidateWorkspacePath(workspacePath string) error {
-	absWorkspacePath, err := filepath.Abs(workspacePath)
-	if err != nil {
-		return err
-	}
-	relative, err := filepath.Rel(manager.root, absWorkspacePath)
-	if err != nil {
-		return err
-	}
-	if relative == ".." || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) {
-		return fmt.Errorf("workspace path is outside root: %s", workspacePath)
-	}
-	return nil
+	return validateWorkspacePath(manager.root, workspacePath)
 }
 
 func SanitizeWorkspaceKey(issueIdentifier string) string {
@@ -155,32 +144,62 @@ func SanitizeWorkspaceKey(issueIdentifier string) string {
 	return sanitized
 }
 
-func (manager *Manager) runHook(parent context.Context, hookName string, workingDir string, script string) (ScriptResult, error) {
+func (manager *Manager) runHook(parent context.Context, hookName string, workingDir string, script string) (string, error) {
 	timeout := manager.hooks.Timeout
 	if timeout <= 0 {
 		timeout = 60 * time.Second
 	}
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
-	result, err := manager.runner.Run(ctx, workingDir, script)
+	output, err := manager.executeCommand(ctx, "sh", []string{"-lc", script}, workingDir)
 	if err != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return result, fmt.Errorf("%s timed out after %s", hookName, timeout)
+			return output, fmt.Errorf("%s timed out after %s", hookName, timeout)
 		}
-		return result, fmt.Errorf("%s failed: %w", hookName, err)
+		return output, fmt.Errorf("%s failed: %w", hookName, err)
 	}
-	return result, nil
+	return output, nil
 }
 
-type execScriptRunner struct{}
+func (manager *Manager) executeCommand(ctx context.Context, command string, args []string, workingDir string) (string, error) {
+	if provider, ok := manager.provider.(contextAwareWorkspaceProvider); ok {
+		return provider.ExecuteContext(ctx, command, args, workingDir)
+	}
 
-func (execScriptRunner) Run(ctx context.Context, workingDir string, script string) (ScriptResult, error) {
-	command := exec.CommandContext(ctx, "sh", "-lc", script)
-	command.Dir = workingDir
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	command.Stdout = &stdout
-	command.Stderr = &stderr
-	err := command.Run()
-	return ScriptResult{Stdout: stdout.String(), Stderr: stderr.String()}, err
+	type result struct {
+		output string
+		err    error
+	}
+	resultCh := make(chan result, 1)
+	go func() {
+		output, err := manager.provider.Execute(command, args, workingDir)
+		resultCh <- result{output: output, err: err}
+	}()
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case result := <-resultCh:
+		return result.output, result.err
+	}
+}
+
+func (manager *Manager) workspacePath(issueIdentifier string) (string, bool) {
+	if provider, ok := manager.provider.(workspacePathProvider); ok {
+		return provider.WorkspacePath(issueIdentifier), true
+	}
+	return filepath.Join(manager.root, SanitizeWorkspaceKey(issueIdentifier)), false
+}
+
+func (manager *Manager) workspaceNeedsCreation(workspacePath string) (bool, error) {
+	stat, err := os.Stat(workspacePath)
+	if err == nil {
+		if !stat.IsDir() {
+			return false, fmt.Errorf("workspace path exists and is not a directory: %s", workspacePath)
+		}
+		return false, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	return true, nil
 }

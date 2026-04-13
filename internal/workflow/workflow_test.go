@@ -87,6 +87,9 @@ func TestResolveConfigAppliesDefaultsAndEnv(t *testing.T) {
 	if config.Workspace.Root != filepath.Clean("/tmp/autopilot/subdir") {
 		t.Fatalf("workspace root = %q", config.Workspace.Root)
 	}
+	if config.Workspace.Provider != "local" {
+		t.Fatalf("workspace provider = %q, want local", config.Workspace.Provider)
+	}
 	if config.Agent.MaxConcurrentAgents != 10 {
 		t.Fatalf("max concurrent agents = %d", config.Agent.MaxConcurrentAgents)
 	}
@@ -95,6 +98,35 @@ func TestResolveConfigAppliesDefaultsAndEnv(t *testing.T) {
 	}
 	if config.Polling.Interval != 30*time.Second {
 		t.Fatalf("polling interval = %s", config.Polling.Interval)
+	}
+}
+
+func TestResolveConfigParsesWorkspaceProviderSettings(t *testing.T) {
+	t.Parallel()
+	definition := Definition{Config: map[string]any{
+		"tracker": map[string]any{
+			"kind":       "github",
+			"repository": "octo/widgets",
+			"api_key":    "token",
+		},
+		"workspace": map[string]any{
+			"provider": "docker",
+			"root":     "/tmp/autopilot",
+			"image":    "ghcr.io/octo/autopilot:latest",
+		},
+	}}
+	config, err := ResolveConfig("/tmp/WORKFLOW.md", definition, nil)
+	if err != nil {
+		t.Fatalf("ResolveConfig() error = %v", err)
+	}
+	if config.Workspace.Provider != "docker" {
+		t.Fatalf("workspace provider = %q, want docker", config.Workspace.Provider)
+	}
+	if config.Workspace.Root != filepath.Clean("/tmp/autopilot") {
+		t.Fatalf("workspace root = %q", config.Workspace.Root)
+	}
+	if config.Workspace.Image != "ghcr.io/octo/autopilot:latest" {
+		t.Fatalf("workspace image = %q", config.Workspace.Image)
 	}
 }
 

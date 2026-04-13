@@ -40,7 +40,11 @@ func (builder DefaultDependencyBuilder) Build(config workflow.Config) (IssueTrac
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	workspaceManager, err := workspacepkg.NewManager(config, nil)
+	workspaceProvider, err := workspacepkg.NewProvider(config.Workspace)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	workspaceManager, err := workspacepkg.NewManager(config, workspaceProvider)
 	if err != nil {
 		return nil, nil, nil, err
 	}

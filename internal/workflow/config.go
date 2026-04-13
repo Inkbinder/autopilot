@@ -10,8 +10,8 @@ import (
 )
 
 var supportedTransports = map[string]struct{}{
-	"acp_stdio":    {},
-	"acp_tcp":      {},
+	"acp_stdio":     {},
+	"acp_tcp":       {},
 	"headless_http": {},
 }
 
@@ -47,15 +47,17 @@ type PollingConfig struct {
 }
 
 type WorkspaceConfig struct {
-	Root string
+	Provider string
+	Root     string
+	Image    string
 }
 
 type HooksConfig struct {
-	AfterCreate string
-	BeforeRun   string
-	AfterRun    string
+	AfterCreate  string
+	BeforeRun    string
+	AfterRun     string
 	BeforeRemove string
-	Timeout     time.Duration
+	Timeout      time.Duration
 }
 
 type AgentConfig struct {
@@ -66,15 +68,15 @@ type AgentConfig struct {
 }
 
 type CopilotConfig struct {
-	Command          string
-	Transport        string
-	CLIArgs          []string
-	Model            string
-	Port             int
-	GitHubMCPTools   []string
-	PromptTimeout    time.Duration
-	StartupTimeout   time.Duration
-	StallTimeout     time.Duration
+	Command        string
+	Transport      string
+	CLIArgs        []string
+	Model          string
+	Port           int
+	GitHubMCPTools []string
+	PromptTimeout  time.Duration
+	StartupTimeout time.Duration
+	StallTimeout   time.Duration
 }
 
 type ServerConfig struct {
@@ -119,13 +121,17 @@ func ResolveConfig(path string, definition Definition, lookupEnv func(string) st
 			ExcludedLabels: normalizeLower(stringSliceValue(trackerMap, "excluded_labels", defaultExcludedLabels)),
 		},
 		Polling: PollingConfig{Interval: durationFromMillis(pollingMap["interval_ms"], 30000*time.Millisecond)},
-		Workspace: WorkspaceConfig{Root: resolvePathValue(stringValue(workspaceMap, "root"), lookupEnv)},
+		Workspace: WorkspaceConfig{
+			Provider: normalizeWorkspaceProvider(stringValue(workspaceMap, "provider")),
+			Root:     resolvePathValue(stringValue(workspaceMap, "root"), lookupEnv),
+			Image:    trimOptionalString(stringValue(workspaceMap, "image")),
+		},
 		Hooks: HooksConfig{
-			AfterCreate: trimOptionalString(stringValue(hooksMap, "after_create")),
-			BeforeRun:   trimOptionalString(stringValue(hooksMap, "before_run")),
-			AfterRun:    trimOptionalString(stringValue(hooksMap, "after_run")),
+			AfterCreate:  trimOptionalString(stringValue(hooksMap, "after_create")),
+			BeforeRun:    trimOptionalString(stringValue(hooksMap, "before_run")),
+			AfterRun:     trimOptionalString(stringValue(hooksMap, "after_run")),
 			BeforeRemove: trimOptionalString(stringValue(hooksMap, "before_remove")),
-			Timeout:     positiveDurationFromMillis(hooksMap["timeout_ms"], 60000*time.Millisecond),
+			Timeout:      positiveDurationFromMillis(hooksMap["timeout_ms"], 60000*time.Millisecond),
 		},
 		Agent: AgentConfig{
 			MaxConcurrentAgents:        positiveInt(agentMap["max_concurrent_agents"], 10),
@@ -144,7 +150,7 @@ func ResolveConfig(path string, definition Definition, lookupEnv func(string) st
 			StartupTimeout: durationFromMillis(copilotMap["startup_timeout_ms"], 5*time.Second),
 			StallTimeout:   durationFromMillis(copilotMap["stall_timeout_ms"], 5*time.Minute),
 		},
-		Server: ServerConfig{Port: optionalInt(serverMap["port"])} ,
+		Server: ServerConfig{Port: optionalInt(serverMap["port"])},
 	}
 
 	if config.Tracker.Kind == "github" && config.Tracker.APIKey == "" {
@@ -152,6 +158,9 @@ func ResolveConfig(path string, definition Definition, lookupEnv func(string) st
 	}
 	if config.Workspace.Root == "" {
 		config.Workspace.Root = filepath.Join(os.TempDir(), "autopilot_workspaces")
+	}
+	if config.Workspace.Provider == "" {
+		config.Workspace.Provider = "local"
 	}
 	if config.Polling.Interval <= 0 {
 		config.Polling.Interval = 30000 * time.Millisecond
@@ -245,6 +254,14 @@ func stringSliceValue(values map[string]any, key string, fallback []string) []st
 		}
 		return []string{value}
 	}
+}
+
+func normalizeWorkspaceProvider(value string) string {
+	provider := strings.ToLower(strings.TrimSpace(value))
+	if provider == "" {
+		return "local"
+	}
+	return provider
 }
 
 func normalizeStringSlice(values []string) []string {
