@@ -1,0 +1,5 @@
+.git
+.autopilot
+autopilot
+bin
+**/node_modules

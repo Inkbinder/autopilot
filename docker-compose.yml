@@ -1,0 +1,34 @@
+# Required before `docker compose up`:
+#   export AUTOPILOT_HOST_ROOT="$(pwd)"
+#   export GITHUB_TOKEN="..."
+#
+# AUTOPILOT_HOST_ROOT must be the absolute host path that contains WORKFLOW.md.
+# The path is mounted into the container at the same absolute location so the
+# orchestrator can safely hand host paths to the Docker daemon during DooD runs.
+# State persists naturally in `${AUTOPILOT_HOST_ROOT}/.autopilot` because the
+# workflow directory is bind-mounted from the host.
+
+services:
+  autopilot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ${AUTOPILOT_IMAGE:-autopilot:local}
+    working_dir: ${AUTOPILOT_HOST_ROOT:?set AUTOPILOT_HOST_ROOT to the absolute directory containing WORKFLOW.md}
+    command:
+      - "-port"
+      - "${AUTOPILOT_PORT:-8080}"
+      - "WORKFLOW.md"
+    environment:
+      AUTOPILOT_HOST_ROOT: ${AUTOPILOT_HOST_ROOT}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:?set GITHUB_TOKEN}
+    ports:
+      - "${AUTOPILOT_PORT:-8080}:${AUTOPILOT_PORT:-8080}"
+    restart: unless-stopped
+    volumes:
+      - type: bind
+        source: ${AUTOPILOT_HOST_ROOT:?set AUTOPILOT_HOST_ROOT to the absolute directory containing WORKFLOW.md}
+        target: ${AUTOPILOT_HOST_ROOT:?set AUTOPILOT_HOST_ROOT to the absolute directory containing WORKFLOW.md}
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
