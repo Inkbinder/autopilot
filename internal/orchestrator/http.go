@@ -84,8 +84,9 @@ func (orchestrator *Orchestrator) handleDashboard(writer http.ResponseWriter, re
 	snapshot := orchestrator.Snapshot()
 	writer.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_ = dashboardTemplate.Execute(writer, map[string]any{
-		"Snapshot":    snapshot,
-		"GeneratedAt": snapshot.GeneratedAt.Format(time.RFC3339),
+		"Snapshot":         snapshot,
+		"GeneratedAt":      snapshot.GeneratedAt.Format(time.RFC3339),
+		"DashboardPollMS": 2000,
 	})
 }
 
@@ -158,22 +159,29 @@ var dashboardTemplate = template.Must(template.New("dashboard").Parse(`<!doctype
   <style>
     body { font-family: Georgia, serif; margin: 2rem; background: #f7f4ec; color: #1f1c17; }
     h1, h2 { margin-bottom: 0.25rem; }
-    .meta { color: #5b5144; margin-bottom: 2rem; }
+		.meta { color: #5b5144; margin-bottom: 1rem; display: flex; gap: 1rem; flex-wrap: wrap; align-items: center; }
+		.badge { display: inline-flex; align-items: center; gap: 0.4rem; padding: 0.35rem 0.65rem; border-radius: 999px; background: #efe6d4; border: 1px solid #d8cfbf; font-size: 0.9rem; }
+		.badge::before { content: ""; width: 0.55rem; height: 0.55rem; border-radius: 999px; background: #0e8a16; }
     .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; margin-bottom: 2rem; }
     .card { background: #fffaf0; border: 1px solid #d8cfbf; padding: 1rem; border-radius: 12px; }
     table { width: 100%; border-collapse: collapse; margin-bottom: 2rem; background: #fffdf8; }
     th, td { text-align: left; padding: 0.75rem; border-bottom: 1px solid #e3dbc9; vertical-align: top; }
     code { font-family: "SFMono-Regular", Consolas, monospace; font-size: 0.9rem; }
+		.muted { color: #7b7062; }
   </style>
 </head>
 <body>
   <h1>Autopilot Runtime</h1>
-  <div class="meta">Generated at {{ .GeneratedAt }}</div>
+	<div class="meta">
+		<div id="generated-at">Generated at {{ .GeneratedAt }}</div>
+		<div class="badge">Auto-refreshing every {{ .DashboardPollMS }}ms</div>
+		<div id="refresh-error" class="muted" hidden></div>
+	</div>
   <div class="cards">
-    <div class="card"><strong>Running</strong><div>{{ .Snapshot.Counts.Running }}</div></div>
-    <div class="card"><strong>Retrying</strong><div>{{ .Snapshot.Counts.Retrying }}</div></div>
-    <div class="card"><strong>Total Tokens</strong><div>{{ .Snapshot.CopilotTotals.TotalTokens }}</div></div>
-    <div class="card"><strong>Runtime Seconds</strong><div>{{ printf "%.1f" .Snapshot.CopilotTotals.SecondsRunning }}</div></div>
+		<div class="card"><strong>Running</strong><div id="count-running">{{ .Snapshot.Counts.Running }}</div></div>
+		<div class="card"><strong>Retrying</strong><div id="count-retrying">{{ .Snapshot.Counts.Retrying }}</div></div>
+		<div class="card"><strong>Total Tokens</strong><div id="total-tokens">{{ .Snapshot.CopilotTotals.TotalTokens }}</div></div>
+		<div class="card"><strong>Runtime Seconds</strong><div id="runtime-seconds">{{ printf "%.1f" .Snapshot.CopilotTotals.SecondsRunning }}</div></div>
   </div>
 
   <h2>Running Sessions</h2>
@@ -181,7 +189,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Parse(`<!doctype
     <thead>
       <tr><th>Issue</th><th>State</th><th>Session</th><th>Turns</th><th>Last Event</th><th>Tokens</th></tr>
     </thead>
-    <tbody>
+		<tbody id="running-body">
       {{ range .Snapshot.Running }}
       <tr>
         <td><code>{{ .Identifier }}</code></td>
@@ -202,7 +210,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Parse(`<!doctype
     <thead>
       <tr><th>Issue</th><th>Attempt</th><th>Due At</th><th>Error</th></tr>
     </thead>
-    <tbody>
+		<tbody id="retrying-body">
       {{ range .Snapshot.Retrying }}
       <tr>
         <td><code>{{ .Identifier }}</code></td>
@@ -215,5 +223,115 @@ var dashboardTemplate = template.Must(template.New("dashboard").Parse(`<!doctype
       {{ end }}
     </tbody>
   </table>
+	<script>
+		(function() {
+			var pollIntervalMs = {{ .DashboardPollMS }};
+
+			function escapeHtml(value) {
+				return String(value)
+					.replace(/&/g, "&amp;")
+					.replace(/</g, "&lt;")
+					.replace(/>/g, "&gt;")
+					.replace(/\"/g, "&quot;")
+					.replace(/'/g, "&#39;");
+			}
+
+			function formatTimestamp(value) {
+				if (!value) {
+					return "";
+				}
+				var date = new Date(value);
+				if (Number.isNaN(date.getTime())) {
+					return value;
+				}
+				return date.toISOString();
+			}
+
+			function setText(id, value) {
+				var element = document.getElementById(id);
+				if (element) {
+					element.textContent = value;
+				}
+			}
+
+			function renderRunningRows(items) {
+				if (!items.length) {
+					return '<tr><td colspan="6">No running sessions.</td></tr>';
+				}
+				return items.map(function(item) {
+					var lastEvent = [item.last_event || "", item.last_message || ""].join(" ").trim();
+					return [
+						'<tr>',
+						'<td><code>' + escapeHtml(item.issue_identifier || "") + '</code></td>',
+						'<td>' + escapeHtml(item.state || "") + '</td>',
+						'<td><code>' + escapeHtml(item.session_id || "") + '</code></td>',
+						'<td>' + escapeHtml(item.turn_count || 0) + '</td>',
+						'<td>' + escapeHtml(lastEvent) + '</td>',
+						'<td>' + escapeHtml((item.tokens && item.tokens.total_tokens) || 0) + '</td>',
+						'</tr>'
+					].join("");
+				}).join("");
+			}
+
+			function renderRetryRows(items) {
+				if (!items.length) {
+					return '<tr><td colspan="4">No queued retries.</td></tr>';
+				}
+				return items.map(function(item) {
+					return [
+						'<tr>',
+						'<td><code>' + escapeHtml(item.issue_identifier || "") + '</code></td>',
+						'<td>' + escapeHtml(item.attempt || 0) + '</td>',
+						'<td>' + escapeHtml(formatTimestamp(item.due_at)) + '</td>',
+						'<td>' + escapeHtml(item.error || "") + '</td>',
+						'</tr>'
+					].join("");
+				}).join("");
+			}
+
+			function renderSnapshot(snapshot) {
+				setText("generated-at", "Generated at " + formatTimestamp(snapshot.generated_at));
+				setText("count-running", snapshot.counts ? snapshot.counts.running : 0);
+				setText("count-retrying", snapshot.counts ? snapshot.counts.retrying : 0);
+				setText("total-tokens", snapshot.copilot_totals ? snapshot.copilot_totals.total_tokens : 0);
+				setText("runtime-seconds", snapshot.copilot_totals ? Number(snapshot.copilot_totals.seconds_running || 0).toFixed(1) : "0.0");
+
+				var runningBody = document.getElementById("running-body");
+				if (runningBody) {
+					runningBody.innerHTML = renderRunningRows(snapshot.running || []);
+				}
+
+				var retryingBody = document.getElementById("retrying-body");
+				if (retryingBody) {
+					retryingBody.innerHTML = renderRetryRows(snapshot.retrying || []);
+				}
+
+				var refreshError = document.getElementById("refresh-error");
+				if (refreshError) {
+					refreshError.hidden = true;
+					refreshError.textContent = "";
+				}
+			}
+
+			async function refreshDashboard() {
+				try {
+					var response = await fetch("/api/v1/state", { cache: "no-store" });
+					if (!response.ok) {
+						throw new Error("state request failed with status " + response.status);
+					}
+					var snapshot = await response.json();
+					renderSnapshot(snapshot);
+				} catch (error) {
+					var refreshError = document.getElementById("refresh-error");
+					if (refreshError) {
+						refreshError.hidden = false;
+						refreshError.textContent = "Auto-refresh paused: " + error.message;
+					}
+				}
+			}
+
+			window.setInterval(refreshDashboard, pollIntervalMs);
+		})();
+	</script>
 </body>
 </html>`))

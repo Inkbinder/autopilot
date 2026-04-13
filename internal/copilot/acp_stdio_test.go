@@ -21,12 +21,12 @@ while IFS= read -r line; do
     *'"method":"initialize"'*)
       echo '{"id":1,"result":{"ok":true}}'
       ;;
-    *'"method":"newSession"'*)
+		*'"method":"session/new"'*)
       echo '{"id":2,"result":{"sessionId":"session-1"}}'
       ;;
-    *'"method":"prompt"'*)
-      echo '{"method":"thread/tokenUsage/updated","params":{"total_token_usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15},"message":"working"}}'
-      echo '{"id":3,"result":{"status":"end_turn"}}'
+		*'"method":"session/prompt"'*)
+			echo '{"method":"session/update","params":{"sessionId":"session-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"working"}}}}'
+			echo '{"id":3,"result":{"stopReason":"end_turn","input_tokens":10,"output_tokens":5,"total_tokens":15}}'
       ;;
   esac
 done
@@ -94,10 +94,10 @@ while IFS= read -r line; do
     *'"method":"initialize"'*)
       echo '{"id":1,"result":{"ok":true}}'
       ;;
-    *'"method":"newSession"'*)
+		*'"method":"session/new"'*)
       echo '{"id":2,"result":{"sessionId":"session-2"}}'
       ;;
-    *'"method":"prompt"'*)
+		*'"method":"session/prompt"'*)
       echo '{"method":"userInputRequired","params":{"message":"need input"}}'
       ;;
   esac
@@ -129,6 +129,48 @@ done
 	}
 	if typedErr.Code != ErrPromptInputRequired && typedErr.Code != ErrPromptFailed {
 		t.Fatalf("unexpected error code %s", typedErr.Code)
+	}
+}
+
+func TestACPStdioClientAutoApprovesPermissionRequest(t *testing.T) {
+	t.Parallel()
+	workspacePath := t.TempDir()
+	script := writeExecutableScript(t, `#!/usr/bin/env bash
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*)
+      echo '{"id":1,"result":{"ok":true}}'
+      ;;
+    *'"method":"session/new"'*)
+      echo '{"id":2,"result":{"sessionId":"session-3"}}'
+      ;;
+    *'"method":"session/prompt"'*)
+      echo '{"id":99,"method":"session/request_permission","params":{"sessionId":"session-3","toolCall":{"toolCallId":"call-1"},"options":[{"optionId":"allow-once","name":"Allow once","kind":"allow_once"},{"optionId":"reject-once","name":"Reject","kind":"reject_once"}]}}'
+      ;;
+	   *'"id":99'*'"optionId":"allow-once"'*'"selected"'*)
+      echo '{"id":3,"result":{"stopReason":"end_turn"}}'
+      ;;
+  esac
+done
+`)
+	client, err := NewClient(workflow.Config{Copilot: workflow.CopilotConfig{Transport: "acp_stdio"}})
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	session, err := client.StartSession(context.Background(), StartRequest{
+		WorkspacePath: workspacePath,
+		Copilot: workflow.CopilotConfig{
+			Command:        script,
+			Transport:      "acp_stdio",
+			StartupTimeout: time.Second,
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartSession() error = %v", err)
+	}
+	defer session.Close(context.Background())
+	if err := session.RunPrompt(context.Background(), "do work", 1); err != nil {
+		t.Fatalf("RunPrompt() error = %v", err)
 	}
 }
 

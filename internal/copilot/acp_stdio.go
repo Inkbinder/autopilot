@@ -167,7 +167,7 @@ func (process *acpProcess) ProcessID() *int {
 
 func (process *acpProcess) RunPrompt(ctx context.Context, prompt string, turn int) error {
 	promptCtx := ctx
-	result, err := process.call(promptCtx, "prompt", map[string]any{
+	result, err := process.call(promptCtx, "session/prompt", map[string]any{
 		"sessionId": process.sessionID,
 		"prompt": []map[string]any{{
 			"type": "text",
@@ -203,7 +203,7 @@ func (process *acpProcess) Close(ctx context.Context) error {
 
 func (process *acpProcess) initialize(ctx context.Context) error {
 	_, err := process.call(ctx, "initialize", map[string]any{
-		"protocolVersion":    "autopilot-v1",
+		"protocolVersion":    1,
 		"clientCapabilities": map[string]any{},
 	})
 	if err != nil {
@@ -216,11 +216,14 @@ func (process *acpProcess) initialize(ctx context.Context) error {
 }
 
 func (process *acpProcess) newSession(ctx context.Context, workspacePath string, model string) (string, error) {
-	params := map[string]any{"cwd": workspacePath}
+	params := map[string]any{
+		"cwd":        workspacePath,
+		"mcpServers": []map[string]any{},
+	}
 	if strings.TrimSpace(model) != "" {
 		params["model"] = model
 	}
-	result, err := process.call(ctx, "newSession", params)
+	result, err := process.call(ctx, "session/new", params)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
 			return "", wrap(ErrStartupTimeout, err)
@@ -355,7 +358,7 @@ func (process *acpProcess) handleInboundEnvelope(envelope acpEnvelope, rawLine [
 			}
 			return
 		}
-		if err := process.respondApproval(*envelope.ID); err != nil {
+		if err := process.respondApproval(*envelope.ID, params); err != nil {
 			select {
 			case process.interrupt <- wrap(ErrPromptFailed, err):
 			default:
@@ -370,13 +373,15 @@ func (process *acpProcess) handleInboundEnvelope(envelope acpEnvelope, rawLine [
 	}
 }
 
-func (process *acpProcess) respondApproval(requestID int) error {
+func (process *acpProcess) respondApproval(requestID int, params map[string]any) error {
+	outcome, err := approvalOutcome(params)
+	if err != nil {
+		return err
+	}
 	response := map[string]any{
 		"id": requestID,
 		"result": map[string]any{
-			"approved": true,
-			"decision": "allow",
-			"action":   "allow",
+			"outcome": outcome,
 		},
 	}
 	line, err := json.Marshal(response)
@@ -498,6 +503,57 @@ func findString(values map[string]any, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+func approvalOutcome(params map[string]any) (map[string]any, error) {
+	optionID := selectPermissionOption(params)
+	if optionID == "" {
+		return nil, fmt.Errorf("permission request missing selectable option")
+	}
+	return map[string]any{
+		"outcome":  "selected",
+		"optionId": optionID,
+	}, nil
+}
+
+func selectPermissionOption(params map[string]any) string {
+	preferred := map[string]int{
+		"allow_once":   0,
+		"allow_always": 1,
+	}
+	bestRank := len(preferred) + 1
+	bestOptionID := ""
+	fallbackOptionID := ""
+	rawOptions, ok := params["options"]
+	if !ok || rawOptions == nil {
+		return ""
+	}
+	options, ok := rawOptions.([]any)
+	if !ok {
+		return ""
+	}
+	for _, rawOption := range options {
+		option, ok := rawOption.(map[string]any)
+		if !ok {
+			continue
+		}
+		optionID := findString(option, "optionId", "option_id", "id")
+		if optionID == "" {
+			continue
+		}
+		if fallbackOptionID == "" {
+			fallbackOptionID = optionID
+		}
+		rank, ok := preferred[strings.ToLower(findString(option, "kind", "type"))]
+		if ok && rank < bestRank {
+			bestRank = rank
+			bestOptionID = optionID
+		}
+	}
+	if bestOptionID != "" {
+		return bestOptionID
+	}
+	return fallbackOptionID
 }
 
 func summarizePayload(values map[string]any) string {

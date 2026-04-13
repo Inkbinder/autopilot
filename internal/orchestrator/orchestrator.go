@@ -267,7 +267,7 @@ func (orchestrator *Orchestrator) dispatchIfEligible(ctx context.Context, issue 
 func (orchestrator *Orchestrator) claimForDispatch(issue model.Issue, attempt *int) (workflow.Definition, workflow.Config, IssueTracker, WorkspaceManager, copilot.Client, bool) {
 	orchestrator.mu.Lock()
 	defer orchestrator.mu.Unlock()
-	if !orchestrator.isEligibleLocked(issue) {
+	if !orchestrator.isEligibleLocked(issue, attempt != nil) {
 		return workflow.Definition{}, workflow.Config{}, nil, nil, nil, false
 	}
 	retryAttempt := 0
@@ -291,14 +291,14 @@ func (orchestrator *Orchestrator) claimForDispatch(issue model.Issue, attempt *i
 	return orchestrator.definition, orchestrator.config, orchestrator.tracker, orchestrator.workspace, orchestrator.copilot, true
 }
 
-func (orchestrator *Orchestrator) isEligibleLocked(issue model.Issue) bool {
+func (orchestrator *Orchestrator) isEligibleLocked(issue model.Issue, allowClaimed bool) bool {
 	if issue.ID == "" || issue.Identifier == "" || issue.Title == "" || issue.State == "" {
 		return false
 	}
 	if _, ok := orchestrator.state.running[issue.ID]; ok {
 		return false
 	}
-	if _, ok := orchestrator.state.claimed[issue.ID]; ok {
+	if _, ok := orchestrator.state.claimed[issue.ID]; ok && !allowClaimed {
 		return false
 	}
 	if !containsNormalized(orchestrator.config.Tracker.ActiveStates, issue.State) {
@@ -385,6 +385,7 @@ func (orchestrator *Orchestrator) runWorker(ctx context.Context, definition work
 
 	currentIssue := issue
 	for turn := 1; turn <= config.Agent.MaxTurns; turn++ {
+		eventCursor := orchestrator.issueEventCursor(issue.ID)
 		turnPrompt := prompt
 		if turn > 1 {
 			turnPrompt = copilot.DefaultContinuationPrompt
@@ -404,6 +405,11 @@ func (orchestrator *Orchestrator) runWorker(ctx context.Context, definition work
 		if len(refreshed) > 0 {
 			currentIssue = refreshed[0]
 			orchestrator.updateIssue(issue.ID, currentIssue)
+		}
+		if containsNormalized(config.Tracker.ActiveStates, currentIssue.State) && !orchestrator.turnProducedProgress(issue.ID, eventCursor) {
+			orchestrator.markRunningIssue(issue.ID, "stalled", false)
+			orchestrator.handleWorkerOutcome(issue.ID, workerOutcome{Issue: currentIssue, Err: fmt.Errorf("no agent activity during turn %d", turn)})
+			return
 		}
 		if !containsNormalized(config.Tracker.ActiveStates, currentIssue.State) {
 			break
@@ -512,7 +518,6 @@ func (orchestrator *Orchestrator) handleRetry(issueID string) {
 		orchestrator.mu.Unlock()
 		return
 	}
-	delete(orchestrator.state.retryAttempts, issueID)
 	identifier := retry.entry.Identifier
 	attempt := retry.entry.Attempt
 	orchestrator.mu.Unlock()
@@ -585,19 +590,22 @@ func (orchestrator *Orchestrator) reconcileRunningIssues(ctx context.Context) {
 }
 
 func (orchestrator *Orchestrator) stopRunningIssue(issueID string, reason string, cleanupWorkspace bool) {
-	orchestrator.mu.Lock()
-	entry, ok := orchestrator.state.running[issueID]
-	if ok {
-		entry.StopReason = reason
-		entry.CleanupWorkspace = cleanupWorkspace
-		cancel := entry.Cancel
-		orchestrator.mu.Unlock()
-		if cancel != nil {
-			cancel()
-		}
-		return
+	cancel := orchestrator.markRunningIssue(issueID, reason, cleanupWorkspace)
+	if cancel != nil {
+		cancel()
 	}
-	orchestrator.mu.Unlock()
+}
+
+func (orchestrator *Orchestrator) markRunningIssue(issueID string, reason string, cleanupWorkspace bool) context.CancelFunc {
+	orchestrator.mu.Lock()
+	defer orchestrator.mu.Unlock()
+	entry, ok := orchestrator.state.running[issueID]
+	if !ok {
+		return nil
+	}
+	entry.StopReason = reason
+	entry.CleanupWorkspace = cleanupWorkspace
+	return entry.Cancel
 }
 
 func (orchestrator *Orchestrator) startupCleanup(ctx context.Context) {
@@ -695,6 +703,37 @@ func (orchestrator *Orchestrator) updateIssue(issueID string, issue model.Issue)
 	if entry, ok := orchestrator.state.running[issueID]; ok {
 		entry.Issue = issue
 	}
+}
+
+func (orchestrator *Orchestrator) issueEventCursor(issueID string) int {
+	orchestrator.mu.Lock()
+	defer orchestrator.mu.Unlock()
+	entry, ok := orchestrator.state.running[issueID]
+	if !ok {
+		return 0
+	}
+	return len(entry.RecentEvents)
+}
+
+func (orchestrator *Orchestrator) turnProducedProgress(issueID string, eventCursor int) bool {
+	orchestrator.mu.Lock()
+	defer orchestrator.mu.Unlock()
+	entry, ok := orchestrator.state.running[issueID]
+	if !ok {
+		return false
+	}
+	if eventCursor < 0 || eventCursor > len(entry.RecentEvents) {
+		eventCursor = len(entry.RecentEvents)
+	}
+	for _, event := range entry.RecentEvents[eventCursor:] {
+		switch event.Event {
+		case "prompt_completed", "session_started":
+			continue
+		default:
+			return true
+		}
+	}
+	return false
 }
 
 func (orchestrator *Orchestrator) handleAgentEvent(issueID string, event copilot.Event) {

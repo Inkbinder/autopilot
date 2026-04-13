@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -85,6 +86,7 @@ func (workspace *fakeWorkspace) ValidateWorkspacePath(string) error { return nil
 type fakeCopilot struct {
 	prompts []string
 	onEvent copilot.EventHandler
+	silent  bool
 }
 
 func (client *fakeCopilot) StartSession(_ context.Context, request copilot.StartRequest) (copilot.Session, error) {
@@ -105,6 +107,9 @@ func (session *fakeSession) ProcessID() *int   { return nil }
 func (session *fakeSession) RunPrompt(_ context.Context, prompt string, turn int) error {
 	session.client.prompts = append(session.client.prompts, prompt)
 	if session.client.onEvent != nil {
+		if !session.client.silent {
+			session.client.onEvent(copilot.Event{Event: "notification", Timestamp: time.Now().UTC(), SessionID: "fake-session", Turn: turn, Message: "working"})
+		}
 		session.client.onEvent(copilot.Event{Event: "prompt_completed", Timestamp: time.Now().UTC(), SessionID: "fake-session", Turn: turn, Usage: &copilot.UsageTotals{InputTokens: 10 * turn, OutputTokens: 5 * turn, TotalTokens: 15 * turn}})
 	}
 	return nil
@@ -172,6 +177,80 @@ func TestOrchestratorTickSkipsIssueWithActiveBlockers(t *testing.T) {
 	_ = orchestrator.shutdown(context.Background())
 }
 
+func TestHandleRetryDispatchesClaimedIssue(t *testing.T) {
+	t.Parallel()
+	workflowPath := writeWorkflowFile(t)
+	issue := model.Issue{ID: "1", Identifier: "octo/widgets#1", Title: "Task", State: "Open", Labels: []string{"autopilot:ready"}}
+	fakeTracker := &fakeTracker{candidates: []model.Issue{issue}, statesByID: map[string]model.Issue{"1": issue}}
+	fakeWorkspace := &fakeWorkspace{root: filepath.Join(t.TempDir(), "workspaces")}
+	fakeCopilot := &fakeCopilot{}
+	orchestrator, err := New(workflowPath, Options{Builder: fakeBuilder{tracker: fakeTracker, workspace: fakeWorkspace, copilot: fakeCopilot}})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	orchestrator.mu.Lock()
+	orchestrator.state.claimed[issue.ID] = struct{}{}
+	orchestrator.state.retryAttempts[issue.ID] = &retryState{
+		entry: model.RetryEntry{IssueID: issue.ID, Identifier: issue.Identifier, Attempt: 2, DueAt: time.Now().Add(time.Minute)},
+		timer: time.NewTimer(time.Hour),
+	}
+	orchestrator.mu.Unlock()
+
+	orchestrator.handleRetry(issue.ID)
+	orchestrator.wg.Wait()
+
+	orchestrator.mu.Lock()
+	if len(fakeCopilot.prompts) != 1 {
+		orchestrator.mu.Unlock()
+		t.Fatalf("prompts = %d, want 1", len(fakeCopilot.prompts))
+	}
+	retry, ok := orchestrator.state.retryAttempts[issue.ID]
+	if !ok {
+		orchestrator.mu.Unlock()
+		t.Fatalf("retry entry missing after continuation dispatch")
+	}
+	if retry.entry.Error != "" {
+		orchestrator.mu.Unlock()
+		t.Fatalf("retry error = %q, want empty continuation retry", retry.entry.Error)
+	}
+	orchestrator.mu.Unlock()
+	_ = orchestrator.shutdown(context.Background())
+}
+
+func TestRunWorkerStopsSilentTurnLoop(t *testing.T) {
+	t.Parallel()
+	workflowPath := writeWorkflowFileWithMaxTurns(t, 3)
+	issue := model.Issue{ID: "1", Identifier: "octo/widgets#1", Title: "Task", State: "Open", Labels: []string{"autopilot:merging"}}
+	fakeTracker := &fakeTracker{candidates: []model.Issue{issue}, statesByID: map[string]model.Issue{"1": issue}}
+	fakeWorkspace := &fakeWorkspace{root: filepath.Join(t.TempDir(), "workspaces")}
+	fakeCopilot := &fakeCopilot{silent: true}
+	orchestrator, err := New(workflowPath, Options{Builder: fakeBuilder{tracker: fakeTracker, workspace: fakeWorkspace, copilot: fakeCopilot}})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	orchestrator.tick(context.Background())
+	orchestrator.wg.Wait()
+
+	orchestrator.mu.Lock()
+	if len(fakeCopilot.prompts) != 1 {
+		orchestrator.mu.Unlock()
+		t.Fatalf("prompts = %d, want 1", len(fakeCopilot.prompts))
+	}
+	retry, ok := orchestrator.state.retryAttempts[issue.ID]
+	if !ok {
+		orchestrator.mu.Unlock()
+		t.Fatalf("retry entry missing after silent turn")
+	}
+	if retry.entry.Error != "stalled session" {
+		orchestrator.mu.Unlock()
+		t.Fatalf("retry error = %q, want stalled session", retry.entry.Error)
+	}
+	orchestrator.mu.Unlock()
+	_ = orchestrator.shutdown(context.Background())
+}
+
 func TestHTTPHandlersServeStateRefreshAndIssueDetail(t *testing.T) {
 	t.Parallel()
 	workflowPath := writeWorkflowFile(t)
@@ -204,6 +283,20 @@ func TestHTTPHandlersServeStateRefreshAndIssueDetail(t *testing.T) {
 	}
 	if snapshot.Counts.Running != 1 || snapshot.Counts.Retrying != 1 {
 		t.Fatalf("unexpected counts: %#v", snapshot.Counts)
+	}
+
+	dashboardRequest := httptest.NewRequest(http.MethodGet, "/", nil)
+	dashboardRecorder := httptest.NewRecorder()
+	orchestrator.handleDashboard(dashboardRecorder, dashboardRequest)
+	if dashboardRecorder.Code != http.StatusOK {
+		t.Fatalf("dashboard status = %d", dashboardRecorder.Code)
+	}
+	dashboardBody := dashboardRecorder.Body.String()
+	if !strings.Contains(dashboardBody, "/api/v1/state") {
+		t.Fatalf("dashboard missing state polling hook: %s", dashboardBody)
+	}
+	if !strings.Contains(dashboardBody, "Auto-refreshing every") {
+		t.Fatalf("dashboard missing auto-refresh indicator: %s", dashboardBody)
 	}
 
 	refreshRequest := httptest.NewRequest(http.MethodPost, "/api/v1/refresh", nil)
@@ -240,6 +333,11 @@ func TestHTTPHandlersServeStateRefreshAndIssueDetail(t *testing.T) {
 
 func writeWorkflowFile(t *testing.T) string {
 	t.Helper()
+	return writeWorkflowFileWithMaxTurns(t, 1)
+}
+
+func writeWorkflowFileWithMaxTurns(t *testing.T, maxTurns int) string {
+	t.Helper()
 	path := filepath.Join(t.TempDir(), "WORKFLOW.md")
 	content := `---
 tracker:
@@ -249,7 +347,7 @@ tracker:
 polling:
   interval_ms: 25
 agent:
-  max_turns: 1
+  max_turns: ` + strconv.Itoa(maxTurns) + `
 copilot:
   command: fake
   transport: acp_stdio
