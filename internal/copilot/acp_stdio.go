@@ -9,14 +9,13 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"os/exec"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/Inkbinder/autopilot/internal/runstate"
 	"github.com/Inkbinder/autopilot/internal/workflow"
+	"github.com/Inkbinder/autopilot/internal/workspace"
 )
 
 const maxACPLineBytes = 10 * 1024 * 1024
@@ -25,6 +24,9 @@ type ACPStdioClient struct {
 	gracePeriod time.Duration
 	auditor     runstate.Writer
 	logger      *slog.Logger
+	executor    interface {
+		ExecuteStream(ctx context.Context, command string, args []string, dir string) (workspace.ExecutionStream, error)
+	}
 }
 
 func NewClient(config workflow.Config) (Client, error) {
@@ -35,7 +37,10 @@ func NewClientWithOptions(config workflow.Config, options ClientOptions) (Client
 	if config.Copilot.Transport != "acp_stdio" {
 		return nil, wrap(ErrUnsupportedTransport, fmt.Errorf("transport %s is not implemented in this build", config.Copilot.Transport))
 	}
-	return &ACPStdioClient{gracePeriod: 2 * time.Second, auditor: options.AuditWriter, logger: options.Logger}, nil
+	if options.StreamExecutor == nil {
+		return nil, wrap(ErrTransportError, fmt.Errorf("workspace stream executor is required"))
+	}
+	return &ACPStdioClient{gracePeriod: 2 * time.Second, auditor: options.AuditWriter, logger: options.Logger, executor: options.StreamExecutor}, nil
 }
 
 func (client *ACPStdioClient) StartSession(ctx context.Context, request StartRequest) (Session, error) {
@@ -46,7 +51,7 @@ func (client *ACPStdioClient) StartSession(ctx context.Context, request StartReq
 	if !stat.IsDir() {
 		return nil, wrap(ErrInvalidWorkspaceCWD, fmt.Errorf("workspace is not a directory: %s", request.WorkspacePath))
 	}
-	process, err := startACPProcess(ctx, request.WorkspacePath, request.Copilot, request.OnEvent, client.gracePeriod, client.auditor, client.logger)
+	process, err := startACPProcess(ctx, client.executor, request.WorkspacePath, request.Copilot, request.OnEvent, client.gracePeriod, client.auditor, client.logger)
 	if err != nil {
 		return nil, err
 	}
@@ -56,7 +61,7 @@ func (client *ACPStdioClient) StartSession(ctx context.Context, request StartReq
 		_ = process.close(context.Background())
 		return nil, err
 	}
-	sessionID, err := process.newSession(startupCtx, request.WorkspacePath, request.Copilot.Model)
+	sessionID, err := process.newSession(startupCtx, process.workingDir, request.Copilot.Model)
 	if err != nil {
 		_ = process.close(context.Background())
 		return nil, err
@@ -72,12 +77,13 @@ func (client *ACPStdioClient) StartSession(ctx context.Context, request StartReq
 }
 
 type acpProcess struct {
-	command     *exec.Cmd
+	stream      workspace.ExecutionStream
 	stdin       io.WriteCloser
 	pid         *int
 	onEvent     EventHandler
 	gracePeriod time.Duration
 	sessionID   string
+	workingDir  string
 	auditor     runstate.Writer
 	logger      *slog.Logger
 	auditMeta   runstate.Metadata
@@ -112,26 +118,19 @@ type acpCallResult struct {
 	RawError   json.RawMessage
 }
 
-func startACPProcess(ctx context.Context, workspacePath string, config workflow.CopilotConfig, onEvent EventHandler, gracePeriod time.Duration, auditor runstate.Writer, logger *slog.Logger) (*acpProcess, error) {
+func startACPProcess(ctx context.Context, executor interface {
+	ExecuteStream(ctx context.Context, command string, args []string, dir string) (workspace.ExecutionStream, error)
+}, workspacePath string, config workflow.CopilotConfig, onEvent EventHandler, gracePeriod time.Duration, auditor runstate.Writer, logger *slog.Logger) (*acpProcess, error) {
 	commandString := buildACPCommand(config)
-	command := exec.Command("bash", "-lc", commandString)
-	command.Dir = workspacePath
-	stdin, err := command.StdinPipe()
-	if err != nil {
-		return nil, wrap(ErrTransportError, err)
+	stream, err := executor.ExecuteStream(ctx, "bash", []string{"-lc", commandString}, workspacePath)
+	executionDir := workspacePath
+	if stream != nil && strings.TrimSpace(stream.WorkingDir()) != "" {
+		executionDir = stream.WorkingDir()
 	}
-	stdout, err := command.StdoutPipe()
-	if err != nil {
-		return nil, wrap(ErrTransportError, err)
-	}
-	stderr, err := command.StderrPipe()
-	if err != nil {
-		return nil, wrap(ErrTransportError, err)
-	}
-	err = command.Start()
 	if auditErr := runstate.RecordAuditEvent(ctx, auditor, "copilot_cli_start", map[string]any{
 		"command":        commandString,
 		"workspace_path": workspacePath,
+		"execution_dir":  executionDir,
 		"success":        err == nil,
 		"error":          errorString(err),
 	}); auditErr != nil {
@@ -140,12 +139,20 @@ func startACPProcess(ctx context.Context, workspacePath string, config workflow.
 	if err != nil {
 		return nil, wrap(ErrCopilotCLINotFound, err)
 	}
+	if stream == nil || stream.Conn() == nil || stream.Stdout() == nil {
+		if stream != nil {
+			_ = stream.Close()
+		}
+		return nil, wrap(ErrTransportError, fmt.Errorf("workspace stream is incomplete"))
+	}
 	auditMeta, _ := runstate.MetadataFromContext(ctx)
 	process := &acpProcess{
-		command:     command,
-		stdin:       stdin,
+		stream:      stream,
+		stdin:       stream.Conn(),
+		pid:         stream.ProcessID(),
 		onEvent:     onEvent,
 		gracePeriod: gracePeriod,
+		workingDir:  executionDir,
 		auditor:     auditor,
 		logger:      logger,
 		auditMeta:   auditMeta,
@@ -153,14 +160,12 @@ func startACPProcess(ctx context.Context, workspacePath string, config workflow.
 		waitDone:    make(chan struct{}),
 		interrupt:   make(chan error, 4),
 	}
-	if command.Process != nil {
-		pid := command.Process.Pid
-		process.pid = &pid
+	go process.readStdout(stream.Stdout())
+	if stream.Stderr() != nil {
+		go process.readStderr(stream.Stderr())
 	}
-	go process.readStdout(stdout)
-	go process.readStderr(stderr)
 	go func() {
-		err := command.Wait()
+		err := stream.Wait()
 		process.mu.Lock()
 		process.waitErr = err
 		process.mu.Unlock()
@@ -468,20 +473,24 @@ func (process *acpProcess) close(_ context.Context) error {
 		process.mu.Lock()
 		process.closed = true
 		process.mu.Unlock()
-		if process.command == nil || process.command.Process == nil {
+		if process.stream == nil {
 			return
 		}
-		_ = process.command.Process.Signal(syscall.SIGTERM)
+		closeErr = process.stream.Close()
 		select {
 		case <-process.waitDone:
 			if err := process.exitErr(); err != nil && !errors.Is(err, os.ErrProcessDone) {
 				closeErr = err
 			}
 		case <-time.After(process.gracePeriod):
-			_ = process.command.Process.Kill()
-			<-process.waitDone
-			if err := process.exitErr(); err != nil && !errors.Is(err, os.ErrProcessDone) {
-				closeErr = err
+			if killable, ok := process.stream.(interface{ Kill() error }); ok {
+				_ = killable.Kill()
+				<-process.waitDone
+				if err := process.exitErr(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+					closeErr = err
+				}
+			} else if closeErr == nil {
+				closeErr = fmt.Errorf("copilot transport did not exit within %s", process.gracePeriod)
 			}
 		}
 	})

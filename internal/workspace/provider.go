@@ -20,13 +20,15 @@ var workspaceKeyPattern = regexp.MustCompile(`[^A-Za-z0-9._-]`)
 type WorkspaceConfig = workflow.WorkspaceConfig
 
 type ProviderOptions struct {
-	AuditWriter runstate.Writer
-	Logger      *slog.Logger
+	AuditWriter         runstate.Writer
+	Logger              *slog.Logger
+	dockerClientFactory func() (dockerAPIClient, error)
 }
 
 type WorkspaceProvider interface {
 	Setup(issueID string, config WorkspaceConfig) (workspacePath string, err error)
 	Execute(command string, args []string, dir string) (output string, err error)
+	ExecuteStream(ctx context.Context, command string, args []string, dir string) (ExecutionStream, error)
 	Teardown(issueID string) error
 }
 
@@ -56,6 +58,8 @@ func NewProviderWithOptions(config WorkspaceConfig, options ProviderOptions) (Wo
 	switch normalizeProviderName(config.Provider) {
 	case "local":
 		return NewLocalProviderWithOptions(config, options)
+	case "docker":
+		return NewDockerProviderWithOptions(config, options)
 	default:
 		return nil, fmt.Errorf("unsupported workspace.provider: %s", config.Provider)
 	}

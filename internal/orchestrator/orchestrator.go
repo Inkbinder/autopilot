@@ -376,7 +376,7 @@ func (orchestrator *Orchestrator) runWorker(ctx context.Context, definition work
 	})
 	if err != nil {
 		if workspace.CreatedNow {
-			_ = os.RemoveAll(workspace.Path)
+			_ = workspaceManager.RemoveForIssue(context.Background(), issue.Identifier)
 		}
 		_ = orchestrator.runPostFlightHooks(phaseCtx, workspace.Path, workspaceManager)
 		orchestrator.handleWorkerOutcome(issue.ID, workerOutcome{Issue: issue, Err: err})

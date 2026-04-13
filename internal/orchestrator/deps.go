@@ -52,7 +52,7 @@ func (builder DefaultDependencyBuilder) Build(config workflow.Config) (IssueTrac
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	copilotClient, err := copilot.NewClientWithOptions(config, copilot.ClientOptions{AuditWriter: builder.RunStore, Logger: builder.Logger})
+	copilotClient, err := copilot.NewClientWithOptions(config, copilot.ClientOptions{AuditWriter: builder.RunStore, Logger: builder.Logger, StreamExecutor: workspaceProvider})
 	if err != nil {
 		return nil, nil, nil, err
 	}

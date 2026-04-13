@@ -7,6 +7,7 @@ import (
 
 	"github.com/Inkbinder/autopilot/internal/runstate"
 	"github.com/Inkbinder/autopilot/internal/workflow"
+	"github.com/Inkbinder/autopilot/internal/workspace"
 )
 
 const DefaultContinuationPrompt = "Continue in the existing session. Do not repeat the original prompt. Review the current workspace state and keep advancing the issue."
@@ -38,8 +39,11 @@ type StartRequest struct {
 }
 
 type ClientOptions struct {
-	AuditWriter runstate.Writer
-	Logger      *slog.Logger
+	AuditWriter    runstate.Writer
+	Logger         *slog.Logger
+	StreamExecutor interface {
+		ExecuteStream(ctx context.Context, command string, args []string, dir string) (workspace.ExecutionStream, error)
+	}
 }
 
 type Client interface {

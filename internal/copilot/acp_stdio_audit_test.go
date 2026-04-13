@@ -9,6 +9,7 @@ import (
 
 	"github.com/Inkbinder/autopilot/internal/runstate"
 	"github.com/Inkbinder/autopilot/internal/workflow"
+	"github.com/Inkbinder/autopilot/internal/workspace"
 )
 
 type auditEventRecorder struct {
@@ -57,7 +58,11 @@ while IFS= read -r line; do
 done
 `)
 	recorder := &auditEventRecorder{}
-	client, err := NewClientWithOptions(workflow.Config{Copilot: workflow.CopilotConfig{Transport: "acp_stdio"}}, ClientOptions{AuditWriter: recorder})
+	provider, err := workspace.NewLocalProvider(workflow.WorkspaceConfig{Root: workspacePath})
+	if err != nil {
+		t.Fatalf("NewLocalProvider() error = %v", err)
+	}
+	client, err := NewClientWithOptions(workflow.Config{Copilot: workflow.CopilotConfig{Transport: "acp_stdio"}}, ClientOptions{AuditWriter: recorder, StreamExecutor: provider})
 	if err != nil {
 		t.Fatalf("NewClientWithOptions() error = %v", err)
 	}

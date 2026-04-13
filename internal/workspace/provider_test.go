@@ -43,12 +43,33 @@ func TestLocalProviderSetupExecuteAndTeardown(t *testing.T) {
 
 func TestNewProviderRejectsUnsupportedProvider(t *testing.T) {
 	t.Parallel()
-	_, err := NewProvider(workflow.WorkspaceConfig{Provider: "docker", Root: t.TempDir()})
+	_, err := NewProvider(workflow.WorkspaceConfig{Provider: "remote", Root: t.TempDir()})
 	if err == nil {
 		t.Fatal("NewProvider() error = nil, want error")
 	}
 	if !strings.Contains(err.Error(), "unsupported workspace.provider") {
 		t.Fatalf("NewProvider() error = %v", err)
+	}
+}
+
+func TestNewProviderSupportsDockerProvider(t *testing.T) {
+	t.Parallel()
+	fakeClient := &fakeDockerClient{}
+	provider, err := NewProviderWithOptions(workflow.WorkspaceConfig{
+		Provider: "docker",
+		Root:     filepath.Join(t.TempDir(), "workspaces"),
+		Image:    "alpine:3.20",
+	}, ProviderOptions{dockerClientFactory: func() (dockerAPIClient, error) {
+		return fakeClient, nil
+	}})
+	if err != nil {
+		t.Fatalf("NewProviderWithOptions() error = %v", err)
+	}
+	if _, ok := provider.(*DockerProvider); !ok {
+		t.Fatalf("provider type = %T, want *DockerProvider", provider)
+	}
+	if len(fakeClient.imagePulls) != 0 {
+		t.Fatalf("unexpected image pull during construction: %#v", fakeClient.imagePulls)
 	}
 }
 

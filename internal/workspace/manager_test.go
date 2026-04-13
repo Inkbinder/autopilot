@@ -50,6 +50,10 @@ func (provider *recordingProvider) Execute(command string, args []string, dir st
 	return "", nil
 }
 
+func (provider *recordingProvider) ExecuteStream(context.Context, string, []string, string) (ExecutionStream, error) {
+	return nil, errors.New("not implemented")
+}
+
 func (provider *recordingProvider) Teardown(issueIdentifier string) error {
 	provider.teardownCalls = append(provider.teardownCalls, issueIdentifier)
 	if provider.teardownErr != nil {

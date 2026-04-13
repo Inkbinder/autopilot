@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Inkbinder/autopilot/internal/workflow"
+	"github.com/Inkbinder/autopilot/internal/workspace"
 )
 
 func TestACPStdioClientSessionAndPrompt(t *testing.T) {
@@ -31,9 +32,10 @@ while IFS= read -r line; do
   esac
 done
 `)
-	client, err := NewClient(workflow.Config{Copilot: workflow.CopilotConfig{Transport: "acp_stdio"}})
+	provider := newLocalStreamProvider(t, workspacePath)
+	client, err := NewClientWithOptions(workflow.Config{Copilot: workflow.CopilotConfig{Transport: "acp_stdio"}}, ClientOptions{StreamExecutor: provider})
 	if err != nil {
-		t.Fatalf("NewClient() error = %v", err)
+		t.Fatalf("NewClientWithOptions() error = %v", err)
 	}
 	var (
 		mu     sync.Mutex
@@ -103,9 +105,10 @@ while IFS= read -r line; do
   esac
 done
 `)
-	client, err := NewClient(workflow.Config{Copilot: workflow.CopilotConfig{Transport: "acp_stdio"}})
+	provider := newLocalStreamProvider(t, workspacePath)
+	client, err := NewClientWithOptions(workflow.Config{Copilot: workflow.CopilotConfig{Transport: "acp_stdio"}}, ClientOptions{StreamExecutor: provider})
 	if err != nil {
-		t.Fatalf("NewClient() error = %v", err)
+		t.Fatalf("NewClientWithOptions() error = %v", err)
 	}
 	session, err := client.StartSession(context.Background(), StartRequest{
 		WorkspacePath: workspacePath,
@@ -153,9 +156,10 @@ while IFS= read -r line; do
   esac
 done
 `)
-	client, err := NewClient(workflow.Config{Copilot: workflow.CopilotConfig{Transport: "acp_stdio"}})
+	provider := newLocalStreamProvider(t, workspacePath)
+	client, err := NewClientWithOptions(workflow.Config{Copilot: workflow.CopilotConfig{Transport: "acp_stdio"}}, ClientOptions{StreamExecutor: provider})
 	if err != nil {
-		t.Fatalf("NewClient() error = %v", err)
+		t.Fatalf("NewClientWithOptions() error = %v", err)
 	}
 	session, err := client.StartSession(context.Background(), StartRequest{
 		WorkspacePath: workspacePath,
@@ -181,4 +185,13 @@ func writeExecutableScript(t *testing.T, content string) string {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
 	return path
+}
+
+func newLocalStreamProvider(t *testing.T, workspacePath string) *workspace.LocalProvider {
+	t.Helper()
+	provider, err := workspace.NewLocalProvider(workflow.WorkspaceConfig{Root: workspacePath})
+	if err != nil {
+		t.Fatalf("NewLocalProvider() error = %v", err)
+	}
+	return provider
 }

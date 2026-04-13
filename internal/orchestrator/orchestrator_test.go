@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -65,8 +66,9 @@ func (tracker *fakeTracker) FetchIssueStatesByIDs(_ context.Context, issueIDs []
 }
 
 type fakeWorkspace struct {
-	root    string
-	removed []string
+	root       string
+	removed    []string
+	prepareErr error
 }
 
 func (workspace *fakeWorkspace) CreateForIssue(_ context.Context, issueIdentifier string) (model.Workspace, error) {
@@ -77,8 +79,10 @@ func (workspace *fakeWorkspace) CreateForIssue(_ context.Context, issueIdentifie
 	return model.Workspace{Path: path, WorkspaceKey: filepath.Base(path), CreatedNow: true}, nil
 }
 
-func (workspace *fakeWorkspace) PrepareForRun(context.Context, model.Workspace) error { return nil }
-func (workspace *fakeWorkspace) RunAfterRunHook(context.Context, string) error        { return nil }
+func (workspace *fakeWorkspace) PrepareForRun(context.Context, model.Workspace) error {
+	return workspace.prepareErr
+}
+func (workspace *fakeWorkspace) RunAfterRunHook(context.Context, string) error { return nil }
 func (workspace *fakeWorkspace) RemoveForIssue(_ context.Context, issueIdentifier string) error {
 	workspace.removed = append(workspace.removed, issueIdentifier)
 	return nil
@@ -323,6 +327,30 @@ func TestRunWorkerStopsOnRateLimitNotification(t *testing.T) {
 		t.Fatalf("retry error = %q, want rate limit message", retry.entry.Error)
 	}
 	orchestrator.mu.Unlock()
+	_ = orchestrator.shutdown(context.Background())
+}
+
+func TestRunWorkerRemovesCreatedWorkspaceWhenPreFlightFails(t *testing.T) {
+	t.Parallel()
+	workflowPath := writeWorkflowFile(t)
+	issue := model.Issue{ID: "1", Identifier: "octo/widgets#1", Title: "Task", State: "Open", Labels: []string{"autopilot:ready"}}
+	fakeTracker := &fakeTracker{candidates: []model.Issue{issue}}
+	fakeWorkspace := &fakeWorkspace{root: filepath.Join(t.TempDir(), "workspaces"), prepareErr: errors.New("before_run failed")}
+	fakeCopilot := &fakeCopilot{}
+	orchestrator, err := New(workflowPath, Options{Builder: fakeBuilder{tracker: fakeTracker, workspace: fakeWorkspace, copilot: fakeCopilot}})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	orchestrator.tick(context.Background())
+	orchestrator.wg.Wait()
+
+	if len(fakeWorkspace.removed) != 1 || fakeWorkspace.removed[0] != issue.Identifier {
+		t.Fatalf("removed workspaces = %#v, want %q", fakeWorkspace.removed, issue.Identifier)
+	}
+	if len(fakeCopilot.prompts) != 0 {
+		t.Fatalf("prompts = %d, want 0", len(fakeCopilot.prompts))
+	}
 	_ = orchestrator.shutdown(context.Background())
 }
 
